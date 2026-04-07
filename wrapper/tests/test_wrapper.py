@@ -373,6 +373,115 @@ class TestProxy:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency guard — 429 when inference slot is busy
+# ---------------------------------------------------------------------------
+
+
+class TestInferenceConcurrency:
+    def test_returns_429_when_slot_busy(self, client):
+        """Acquiring the semaphore externally simulates a busy inference slot."""
+        original_sem = m._inference_semaphore
+        # Replace with a freshly-exhausted semaphore (value=0).
+        busy_sem = asyncio.Semaphore(0)
+        m._inference_semaphore = busy_sem
+        try:
+            resp = client.post("/v1/chat/completions", json={"messages": []})
+            assert resp.status_code == 429
+            assert "busy" in resp.json()["error"]
+            assert resp.headers.get("retry-after") == "5"
+        finally:
+            m._inference_semaphore = original_sem
+
+    def test_returns_429_for_completions_when_busy(self, client):
+        original_sem = m._inference_semaphore
+        m._inference_semaphore = asyncio.Semaphore(0)
+        try:
+            resp = client.post("/v1/completions", json={"prompt": "hi"})
+            assert resp.status_code == 429
+        finally:
+            m._inference_semaphore = original_sem
+
+    def test_returns_429_for_embeddings_when_busy(self, client):
+        original_sem = m._inference_semaphore
+        m._inference_semaphore = asyncio.Semaphore(0)
+        try:
+            resp = client.post("/v1/embeddings", json={"input": "hi"})
+            assert resp.status_code == 429
+        finally:
+            m._inference_semaphore = original_sem
+
+    def test_non_inference_path_not_throttled(self, client):
+        """Non-inference paths should NOT be gated by the semaphore."""
+        original_sem = m._inference_semaphore
+        m._inference_semaphore = asyncio.Semaphore(0)
+        try:
+            # /v1/models is not an inference path; it should reach the proxy
+            # (which will fail because llama-server isn't running in tests —
+            # that's fine; we only care it doesn't return 429).
+            resp = client.get("/v1/models")
+            assert resp.status_code != 429
+        finally:
+            m._inference_semaphore = original_sem
+
+
+# ---------------------------------------------------------------------------
+# max_tokens capping
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTokensCapping:
+    def _post_chat(self, payload: dict, max_tokens_cap: int = 512):
+        """POST /v1/chat/completions and return the body forwarded to llama-server."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        captured = {}
+
+        async def fake_send(self_arg, req, **kwargs):
+            captured["body"] = _json.loads(req.content)
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {"content-type": "application/json"}
+
+            async def aiter_raw():
+                yield b'{"choices":[]}'
+
+            async def aclose():
+                pass
+
+            resp.aiter_raw = aiter_raw
+            resp.aclose = aclose
+            return resp
+
+        original_max = m.MAX_TOKENS
+        m.MAX_TOKENS = max_tokens_cap
+        try:
+            with patch.object(m.httpx.AsyncClient, "send", new=fake_send):
+                from fastapi.testclient import TestClient
+
+                with TestClient(m.app) as c:
+                    c.post("/v1/chat/completions", json=payload)
+        finally:
+            m.MAX_TOKENS = original_max
+
+        return captured.get("body", {})
+
+    def test_caps_large_max_tokens(self, reset_state):
+        body = self._post_chat({"messages": [], "max_tokens": 9999}, max_tokens_cap=512)
+        assert body.get("max_tokens") == 512
+
+    def test_sets_max_tokens_when_absent(self, reset_state):
+        body = self._post_chat({"messages": []}, max_tokens_cap=512)
+        assert body.get("max_tokens") == 512
+
+    def test_does_not_raise_max_tokens(self, reset_state):
+        """If the caller requests fewer tokens than the cap, preserve their value."""
+        body = self._post_chat({"messages": [], "max_tokens": 100}, max_tokens_cap=2048)
+        assert body.get("max_tokens") == 100
+
+
+
+# ---------------------------------------------------------------------------
 # GGUF validation in _do_download (async unit test)
 # ---------------------------------------------------------------------------
 
