@@ -21,10 +21,11 @@ All tunables live in `.env` (copy from `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODEL_PATH` | `/data/models/llm/model.gguf` | Absolute path **inside the container** to the GGUF file |
+| `MODEL_PATH` | `/data/models/llm/model.gguf` | Absolute path **inside the container** to the initial GGUF file |
 | `N_GPU_LAYERS` | `-1` | Layers offloaded to GPU. `-1` = all (full GPU offload) |
 | `CTX_SIZE` | `4096` | Context window in tokens |
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
+| `ADMIN_TOKEN` | *(empty)* | Bearer token required for model management write endpoints. Leave empty to disable auth (dev only). |
 
 ---
 
@@ -32,7 +33,7 @@ All tunables live in `.env` (copy from `.env.example`):
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `/data/models` | `/data/models` (read-only) | GGUF model files |
+| `/data/models` | `/data/models` (read-write) | GGUF model files — read-write so that the download endpoint can place new models |
 | `/data/llm` | `/data/llm` | Runtime state, logs, and cache |
 
 ---
@@ -64,7 +65,174 @@ MODEL_PATH=/data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf
 
 ---
 
-## VRAM budget
+## Model management
+
+The service ships a **Python/FastAPI wrapper** (`wrapper/main.py`) that manages
+`llama-server` as a child process and adds a model management API.  All model
+management endpoints are available on the same published port (default `5301`).
+
+> **Architecture note:** The wrapper is the only container process.  It starts
+> `llama-server` internally, proxies all `/v1/*` and other llama-server requests
+> transparently, and handles `/api/models/*` itself.
+
+### Admin authentication
+
+Set `ADMIN_TOKEN` in `.env` to a strong random string.  All write endpoints
+(`POST /api/models/download` and `POST /api/models/load`) require the header:
+
+```
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+When `ADMIN_TOKEN` is empty the admin endpoints are **unauthenticated** — do
+not leave it empty in production.
+
+---
+
+### List models — `GET /api/models`
+
+Returns metadata for every `.gguf` file found in `/data/models/llm/`.
+
+```bash
+curl -s http://localhost:5301/api/models | jq .
+```
+
+Response:
+
+```json
+{
+  "models": [
+    {
+      "filename": "mistral-7b-v0.3.Q4_K_M.gguf",
+      "path": "/data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf",
+      "size_bytes": 4368438976,
+      "quantization": "Q4_K_M",
+      "loaded": true
+    },
+    {
+      "filename": "llama-3.1-8b-Q5_K_S.gguf",
+      "path": "/data/models/llm/llama-3.1-8b-Q5_K_S.gguf",
+      "size_bytes": 5368709120,
+      "quantization": "Q5_K_S",
+      "loaded": false
+    }
+  ],
+  "loaded_model": "/data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf",
+  "status": "ready"
+}
+```
+
+---
+
+### Download a model — `POST /api/models/download`
+
+Downloads a GGUF file from a URL into `/data/models/llm/` without rebuilding
+the container.
+
+```bash
+curl -s -X POST http://localhost:5301/api/models/download \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://huggingface.co/TheBloke/Mistral-7B-v0.3-GGUF/resolve/main/mistral-7b-v0.3.Q4_K_M.gguf",
+    "filename": "mistral-7b-v0.3.Q4_K_M.gguf"
+  }' | jq .
+```
+
+Response (HTTP 202 Accepted):
+
+```json
+{
+  "task_id": "a3b2c1d0-...",
+  "status": "pending",
+  "filename": "mistral-7b-v0.3.Q4_K_M.gguf",
+  "bytes_downloaded": 0,
+  "total_bytes": null,
+  "error": null
+}
+```
+
+The download runs in the background.  Poll for progress:
+
+```bash
+curl -s http://localhost:5301/api/models/download/<task_id> | jq .
+```
+
+**Validation rules:**
+* Destination filename must end with `.gguf`.
+* Path separators (`/`, `\`) in the filename are rejected.
+* At least **1 GiB** of free disk space must be available before the download starts.
+* After the download, the first four bytes are verified against the GGUF magic
+  (`GGUF`). Files that fail validation are deleted automatically.
+
+---
+
+### Switch active model — `POST /api/models/load`
+
+Restarts `llama-server` with a different GGUF file already present in
+`/data/models/llm/`.
+
+```bash
+curl -s -X POST http://localhost:5301/api/models/load \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "llama-3.1-8b-Q5_K_S.gguf"}' | jq .
+```
+
+Response (once the new model is ready):
+
+```json
+{
+  "loaded_model": "/data/models/llm/llama-3.1-8b-Q5_K_S.gguf",
+  "status": "ready",
+  "error": null
+}
+```
+
+**Readiness semantics — no zero-downtime guarantee:**
+
+| Phase | `GET /health` response | Inference (`/v1/*`) |
+|---|---|---|
+| Model switch in progress | `{"status":"loading"}` | HTTP 503 |
+| New model ready | `{"status":"ok"}` | Normal |
+| New model failed to load | `{"status":"error"}` | HTTP 503 |
+
+Poll `GET /health` after calling this endpoint and only resume sending
+inference requests once `{"status":"ok"}` is returned.
+
+---
+
+### Health endpoint — `GET /health`
+
+Reflects the wrapper state, not just the llama-server process.
+
+| Response | Meaning |
+|---|---|
+| `{"status":"ok"}` | llama-server is running and healthy |
+| `{"status":"loading"}` | Container just started, or a model switch is in progress |
+| `{"status":"error","detail":"..."}` | llama-server failed to start or become healthy |
+
+---
+
+### Admin UI model picker (control-plane contract)
+
+A future gateway-control-plane admin UI can integrate using these endpoints:
+
+| Action | Endpoint |
+|---|---|
+| Populate model picker | `GET /api/models` |
+| Download a new model | `POST /api/models/download` + poll `GET /api/models/download/{task_id}` |
+| Switch active model | `POST /api/models/load` + poll `GET /health` |
+
+The UI should treat all write calls as asynchronous:
+1. Call the endpoint.
+2. Show a loading/spinner state.
+3. Poll until `status` reaches a terminal value (`ready`, `done`, or `error`).
+
+The admin token must be kept in the control-plane secret store and injected as
+the `Authorization` header — it must **not** be exposed to end users.
+
+---
 
 | Component | Approximate VRAM |
 |---|---|
@@ -217,7 +385,7 @@ The chat-platform provider adapter calls this endpoint to populate its model pic
 
 ## Deployment via gateway-control-plane
 
-This repository is deployable as a `container-service` using `build.strategy: repo-compose`. The full workload manifest for gateway-control-plane is:
+This repository is deployable as a `container-service` using `build.strategy: repo-compose`. The wrapper service is built from `./wrapper` so the control-plane must have access to the full repo. The full workload manifest for gateway-control-plane is:
 
 ```yaml
 services:
@@ -235,10 +403,11 @@ services:
       MODEL_PATH: /data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf
       N_GPU_LAYERS: "-1"
       CTX_SIZE: "4096"
+      ADMIN_TOKEN: "<your-admin-token>"
     mounts:
       - source: /data/models
         target: /data/models
-        readOnly: true
+        readOnly: false
       - source: /data/llm
         target: /data/llm
         readOnly: false
@@ -249,7 +418,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      startPeriod: 60s
+      startPeriod: 120s
 ```
 
 Key manifest fields:
@@ -259,7 +428,7 @@ Key manifest fields:
 | `build.strategy` | `repo-compose` | Instructs the control plane to deploy the `docker-compose.yml` from this repo |
 | `network.mode` | `bridge` | Standard Docker bridge networking; exposes `HOST_PORT` on the host |
 | `runtime.class` | `nvidia` | Enables NVIDIA GPU access inside the container |
-| `mounts[0]` | `/data/models` → `/data/models` (read-only) | GGUF model files |
+| `mounts[0]` | `/data/models` → `/data/models` (read-write) | GGUF model files — read-write so that `POST /api/models/download` can write new models |
 | `mounts[1]` | `/data/llm` → `/data/llm` (read-write) | Runtime state, logs, and KV-cache scratch space |
 | `healthCheck.http.path` | `/health` | llama-server health probe; returns `{"status":"ok"}` when ready |
 | `healthCheck.http.port` | `5301` | Published host port (matches `HOST_PORT`) |
