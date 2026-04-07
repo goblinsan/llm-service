@@ -5,7 +5,6 @@ is imported) so that SKIP_LLAMA_STARTUP=1 prevents the startup event from
 launching a real llama-server binary.
 """
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -379,41 +378,39 @@ class TestProxy:
 
 class TestInferenceConcurrency:
     def test_returns_429_when_slot_busy(self, client):
-        """Acquiring the semaphore externally simulates a busy inference slot."""
-        original_sem = m._inference_semaphore
-        # Replace with a freshly-exhausted semaphore (value=0).
-        busy_sem = asyncio.Semaphore(0)
-        m._inference_semaphore = busy_sem
+        """Setting _active_inference to the cap simulates a busy inference slot."""
+        original = m._active_inference
+        m._active_inference = m.MAX_CONCURRENT_REQUESTS
         try:
             resp = client.post("/v1/chat/completions", json={"messages": []})
             assert resp.status_code == 429
             assert "busy" in resp.json()["error"]
             assert resp.headers.get("retry-after") == "5"
         finally:
-            m._inference_semaphore = original_sem
+            m._active_inference = original
 
     def test_returns_429_for_completions_when_busy(self, client):
-        original_sem = m._inference_semaphore
-        m._inference_semaphore = asyncio.Semaphore(0)
+        original = m._active_inference
+        m._active_inference = m.MAX_CONCURRENT_REQUESTS
         try:
             resp = client.post("/v1/completions", json={"prompt": "hi"})
             assert resp.status_code == 429
         finally:
-            m._inference_semaphore = original_sem
+            m._active_inference = original
 
     def test_returns_429_for_embeddings_when_busy(self, client):
-        original_sem = m._inference_semaphore
-        m._inference_semaphore = asyncio.Semaphore(0)
+        original = m._active_inference
+        m._active_inference = m.MAX_CONCURRENT_REQUESTS
         try:
             resp = client.post("/v1/embeddings", json={"input": "hi"})
             assert resp.status_code == 429
         finally:
-            m._inference_semaphore = original_sem
+            m._active_inference = original
 
     def test_non_inference_path_not_throttled(self, client):
-        """Non-inference paths should NOT be gated by the semaphore."""
-        original_sem = m._inference_semaphore
-        m._inference_semaphore = asyncio.Semaphore(0)
+        """Non-inference paths should NOT be gated by the concurrency counter."""
+        original = m._active_inference
+        m._active_inference = m.MAX_CONCURRENT_REQUESTS
         try:
             # /v1/models is not an inference path; it should reach the proxy
             # (which will fail because llama-server isn't running in tests —
@@ -421,7 +418,7 @@ class TestInferenceConcurrency:
             resp = client.get("/v1/models")
             assert resp.status_code != 429
         finally:
-            m._inference_semaphore = original_sem
+            m._active_inference = original
 
 
 # ---------------------------------------------------------------------------

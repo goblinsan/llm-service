@@ -275,7 +275,8 @@ CTX_SIZE=2048          # KV cache ~0.4 GB, total LLM ~5.1 GB
 MAX_CONCURRENT_REQUESTS=1  # serialise inference
 ```
 
-Expected combined VRAM with these settings: ~5.1 GB (LLM) + ~3.1 GB (STT) = **~8.2 GB** — within reach of an 8 GB card when STT and LLM are never active simultaneously (which the `MAX_CONCURRENT_REQUESTS=1` + upstream scheduler enforces).
+Expected combined VRAM with these settings: ~5.1 GB (LLM) + ~3.1 GB (STT) = **~8.2 GB**.  
+This stays within an 8 GB card provided the two services are never active simultaneously — a property enforced by `MAX_CONCURRENT_REQUESTS=1` together with an upstream scheduler that drains STT before routing to the LLM (or vice versa).
 
 ---
 

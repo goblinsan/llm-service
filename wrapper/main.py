@@ -117,10 +117,10 @@ _state: dict = {
 
 _downloads: dict[str, dict] = {}  # task_id → progress dict
 
-# Semaphore that limits simultaneous inference requests.  Initialised here at
-# module level so it is always available (asyncio.Semaphore is safe to create
-# outside a running loop in Python ≥ 3.10).
-_inference_semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+# Counter of in-flight inference requests.  Because asyncio is single-threaded,
+# incrementing/decrementing this integer is safe without a lock (there is no
+# await between the check and the increment below).
+_active_inference: int = 0
 
 # Paths that count as inference requests (GPU-bound; subject to concurrency cap).
 _INFERENCE_PATHS: frozenset[str] = frozenset(
@@ -576,15 +576,16 @@ async def proxy(request: Request, path: str) -> Response:
     # default) so that a long generation cannot starve other GPU work.     #
     # ------------------------------------------------------------------ #
     if is_inference:
-        # asyncio is single-threaded: checking _value then acquiring is
-        # atomic with respect to other coroutines.
-        if _inference_semaphore._value <= 0:
+        global _active_inference
+        # asyncio is single-threaded: the check and increment below are
+        # atomic with respect to other coroutines (no await in between).
+        if _active_inference >= MAX_CONCURRENT_REQUESTS:
             return JSONResponse(
                 {"error": "inference slot busy, please retry later"},
                 status_code=429,
                 headers={"Retry-After": "5"},
             )
-        await _inference_semaphore.acquire()
+        _active_inference += 1
 
     target_url = f"http://127.0.0.1:{LLAMA_PORT}/{path}"
     if request.url.query:
@@ -632,19 +633,19 @@ async def proxy(request: Request, path: str) -> Response:
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         await client.aclose()
         if is_inference:
-            _inference_semaphore.release()
+            _active_inference -= 1
         log.warning("Proxy connect error: %s", exc)
         return JSONResponse({"error": "backend unavailable"}, status_code=503)
     except httpx.ReadTimeout:
         await client.aclose()
         if is_inference:
-            _inference_semaphore.release()
+            _active_inference -= 1
         log.warning("Inference request timed out after %.0fs", REQUEST_TIMEOUT)
         return JSONResponse({"error": "inference timeout"}, status_code=504)
     except Exception:
         await client.aclose()
         if is_inference:
-            _inference_semaphore.release()
+            _active_inference -= 1
         raise
 
     resp_headers = {
@@ -663,7 +664,8 @@ async def proxy(request: Request, path: str) -> Response:
             await upstream_resp.aclose()
             await client.aclose()
             if is_inference:
-                _inference_semaphore.release()
+                global _active_inference
+                _active_inference -= 1
 
     return StreamingResponse(
         body_gen(),
