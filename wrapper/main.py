@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -293,7 +294,7 @@ async def download_model(
     _require_admin(authorization)
 
     # Derive destination filename; accept only the bare basename.
-    raw_name = req.filename or Path(req.url.split("?")[0]).name
+    raw_name = req.filename or Path(urllib.parse.urlparse(req.url).path).name
     safe_filename = os.path.basename(raw_name)
     if not safe_filename or safe_filename in {".", ".."}:
         raise HTTPException(
@@ -306,10 +307,14 @@ async def download_model(
         raise HTTPException(status_code=400, detail="Destination filename must end with .gguf")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    # Check for conflicts via a directory scan so we never use a user-derived
+    # path in a file-existence check (avoids path-injection taint).
+    if MODELS_DIR.is_dir() and any(
+        f.name == safe_filename for f in MODELS_DIR.iterdir() if f.is_file()
+    ):
+        raise HTTPException(status_code=409, detail=f"Model already exists: {safe_filename}")
     # Build destination from the trusted directory and the sanitized basename.
     dest = MODELS_DIR / safe_filename
-    if dest.exists():
-        raise HTTPException(status_code=409, detail=f"Model already exists: {safe_filename}")
 
     free = _free_bytes(MODELS_DIR)
     if free < 1_073_741_824:  # 1 GiB
@@ -378,7 +383,7 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
         info["status"] = "error"
         info["error"] = f"Download failed: HTTP {exc.response.status_code}"
         log.error("Model download failed (task=%s): %s", task_id, exc)
-    except httpx.RequestError:
+    except httpx.RequestError as exc:
         tmp.unlink(missing_ok=True)
         info["status"] = "error"
         info["error"] = "Download failed: network error"
