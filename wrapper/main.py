@@ -24,7 +24,11 @@ N_GPU_LAYERS        Layers offloaded to GPU (-1 = all).  Default: -1
 CTX_SIZE            Context window in tokens.  Default: 4096
 ADMIN_TOKEN         Bearer token required for write operations.
                     Leave empty to disable authentication (dev only).
-LLAMA_PORT          Internal port llama-server listens on.  Default: 11434
+LLAMA_PORT          Internal port llama-server listens on.  Default: 8081
+LLAMA_STARTUP_TIMEOUT Seconds to wait for llama-server /health after launch.
+                    Default: 120
+DOWNLOAD_READ_TIMEOUT Read timeout in seconds for model downloads.
+                    Default: 300
 SKIP_LLAMA_STARTUP  Set to "1" to skip launching llama-server (test mode).
 """
 
@@ -67,6 +71,7 @@ N_GPU_LAYERS: str = os.getenv("N_GPU_LAYERS", "-1")
 CTX_SIZE: str = os.getenv("CTX_SIZE", "4096")
 INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
 LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
+DOWNLOAD_READ_TIMEOUT: float = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "300"))
 _SKIP_LLAMA_STARTUP: bool = os.getenv("SKIP_LLAMA_STARTUP", "0") == "1"
 
 
@@ -355,7 +360,10 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
     info["status"] = "downloading"
     tmp = dest.with_suffix(".tmp")
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=30.0, read=DOWNLOAD_READ_TIMEOUT),
+        ) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
                 total = response.headers.get("content-length")

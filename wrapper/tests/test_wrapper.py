@@ -72,6 +72,9 @@ class TestParseQuant:
     def test_case_insensitive(self):
         assert m._parse_quant("model-q4_k_m.gguf") == "Q4_K_M"
 
+    def test_empty_string(self):
+        assert m._parse_quant("") is None
+
 
 # ---------------------------------------------------------------------------
 # GET /health
