@@ -29,6 +29,16 @@ LLAMA_STARTUP_TIMEOUT Seconds to wait for llama-server /health after launch.
                     Default: 120
 DOWNLOAD_READ_TIMEOUT Read timeout in seconds for model downloads.
                     Default: 300
+MAX_TOKENS          Hard cap on max_tokens for each inference request.
+                    Requests that omit max_tokens or exceed this cap are
+                    silently clamped to this value.  Default: 2048
+REQUEST_TIMEOUT     Seconds before an in-flight inference request is
+                    abandoned and a 504 is returned to the caller.
+                    Default: 120
+MAX_CONCURRENT_REQUESTS
+                    Maximum number of inference requests that may run
+                    simultaneously.  Additional requests receive HTTP 429.
+                    Default: 1  (serialise, like the STT service)
 SKIP_LLAMA_STARTUP  Set to "1" to skip launching llama-server (test mode).
 """
 
@@ -36,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -72,6 +83,9 @@ CTX_SIZE: str = os.getenv("CTX_SIZE", "4096")
 INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
 LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
 DOWNLOAD_READ_TIMEOUT: float = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "300"))
+MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "2048"))
+REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
+MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "1"))
 _SKIP_LLAMA_STARTUP: bool = os.getenv("SKIP_LLAMA_STARTUP", "0") == "1"
 
 
@@ -102,6 +116,20 @@ _state: dict = {
 }
 
 _downloads: dict[str, dict] = {}  # task_id → progress dict
+
+# Counter of in-flight inference requests.  Because asyncio is single-threaded,
+# incrementing/decrementing this integer is safe without a lock (there is no
+# await between the check and the increment below).
+_active_inference: int = 0
+
+# Paths that count as inference requests (GPU-bound; subject to concurrency cap).
+_INFERENCE_PATHS: frozenset[str] = frozenset(
+    {"v1/chat/completions", "v1/completions", "v1/embeddings"}
+)
+# Inference paths where a max_tokens budget must be enforced.
+_TOKEN_BUDGET_PATHS: frozenset[str] = frozenset(
+    {"v1/chat/completions", "v1/completions"}
+)
 
 # ---------------------------------------------------------------------------
 # FastAPI application
@@ -541,6 +569,24 @@ async def proxy(request: Request, path: str) -> Response:
             status_code=503,
         )
 
+    is_inference = path in _INFERENCE_PATHS
+
+    # ------------------------------------------------------------------ #
+    # Concurrency guard — serialise inference requests (one slot by        #
+    # default) so that a long generation cannot starve other GPU work.     #
+    # ------------------------------------------------------------------ #
+    if is_inference:
+        global _active_inference
+        # asyncio is single-threaded: the check and increment below are
+        # atomic with respect to other coroutines (no await in between).
+        if _active_inference >= MAX_CONCURRENT_REQUESTS:
+            return JSONResponse(
+                {"error": "inference slot busy, please retry later"},
+                status_code=429,
+                headers={"Retry-After": "5"},
+            )
+        _active_inference += 1
+
     target_url = f"http://127.0.0.1:{LLAMA_PORT}/{path}"
     if request.url.query:
         target_url = f"{target_url}?{request.url.query}"
@@ -552,7 +598,30 @@ async def proxy(request: Request, path: str) -> Response:
     }
     body = await request.body()
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(None))
+    # ------------------------------------------------------------------ #
+    # Token-budget enforcement — silently clamp max_tokens to MAX_TOKENS  #
+    # so a single request cannot monopolise VRAM via a huge KV cache.     #
+    # ------------------------------------------------------------------ #
+    if is_inference and path in _TOKEN_BUDGET_PATHS and body:
+        try:
+            payload = json.loads(body)
+            effective_max = payload.get("max_tokens")
+            if effective_max is None or effective_max > MAX_TOKENS:
+                payload["max_tokens"] = MAX_TOKENS
+                body = json.dumps(payload).encode()
+                fwd_headers["content-length"] = str(len(body))
+                fwd_headers.setdefault("content-type", "application/json")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass  # malformed body — let llama-server handle it
+
+    # Use a finite read timeout only for GPU-bound inference requests.
+    timeout = (
+        httpx.Timeout(connect=30.0, read=REQUEST_TIMEOUT, write=30.0, pool=30.0)
+        if is_inference
+        else httpx.Timeout(None)
+    )
+
+    client = httpx.AsyncClient(timeout=timeout)
     try:
         upstream_req = client.build_request(
             method=request.method,
@@ -563,10 +632,20 @@ async def proxy(request: Request, path: str) -> Response:
         upstream_resp = await client.send(upstream_req, stream=True)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         await client.aclose()
+        if is_inference:
+            _active_inference -= 1
         log.warning("Proxy connect error: %s", exc)
         return JSONResponse({"error": "backend unavailable"}, status_code=503)
+    except httpx.ReadTimeout:
+        await client.aclose()
+        if is_inference:
+            _active_inference -= 1
+        log.warning("Inference request timed out after %.0fs", REQUEST_TIMEOUT)
+        return JSONResponse({"error": "inference timeout"}, status_code=504)
     except Exception:
         await client.aclose()
+        if is_inference:
+            _active_inference -= 1
         raise
 
     resp_headers = {
@@ -579,9 +658,14 @@ async def proxy(request: Request, path: str) -> Response:
         try:
             async for chunk in upstream_resp.aiter_raw():
                 yield chunk
+        except httpx.ReadTimeout:
+            log.warning("Inference response timed out during streaming")
         finally:
             await upstream_resp.aclose()
             await client.aclose()
+            if is_inference:
+                global _active_inference
+                _active_inference -= 1
 
     return StreamingResponse(
         body_gen(),

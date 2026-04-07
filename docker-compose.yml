@@ -13,6 +13,9 @@ services:
       N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
       CTX_SIZE: ${CTX_SIZE:-4096}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      MAX_TOKENS: ${MAX_TOKENS:-2048}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-120}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-1}
     deploy:
       resources:
         reservations:

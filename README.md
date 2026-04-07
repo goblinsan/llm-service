@@ -26,6 +26,9 @@ All tunables live in `.env` (copy from `.env.example`):
 | `CTX_SIZE` | `4096` | Context window in tokens |
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token required for model management write endpoints. Leave empty to disable auth (dev only). |
+| `MAX_TOKENS` | `2048` | Hard cap on `max_tokens` per inference request. Requests that exceed this value (or omit it) are silently clamped. Lower values reduce peak KV-cache VRAM pressure. |
+| `REQUEST_TIMEOUT` | `120` | Seconds before an in-flight inference request is abandoned and a `504` is returned to the caller. |
+| `MAX_CONCURRENT_REQUESTS` | `1` | Maximum simultaneous inference requests. Additional requests receive `HTTP 429`. Default of `1` serialises inference to avoid starving other GPU workloads. |
 
 ---
 
@@ -234,19 +237,46 @@ the `Authorization` header — it must **not** be exposed to end users.
 
 ---
 
-| Component | Approximate VRAM |
-|---|---|
-| Mistral 7B Q4_K_M weights | 4.5 GB |
-| KV cache @ 4096 ctx | 0.7 GB |
-| CUDA runtime overhead | 0.3 GB |
-| **Total** | **~5.5 GB** |
-| **Available headroom (8 GB card)** | **~2.5 GB** |
+## VRAM coexistence
 
-The remaining ~2.5 GB provides room for a concurrent STT (speech-to-text) process.  
-**Scheduling note:** simultaneous STT inference + LLM inference on the same GPU is feasible but may cause latency spikes. Recommendation:
-- Run STT in a separate CUDA stream / container with `--gpus` scoped to a fraction of the device.
-- If both services must run on the same physical GPU, limit LLM `CTX_SIZE` to `2048` to reclaim ~0.4 GB of KV-cache VRAM and reduce peak pressure.
-- Monitor with `nvidia-smi dmon` and set `CUDA_MPS_PIPE_DIRECTORY` if using Multi-Process Service for fine-grained sharing.
+This service is designed to coexist on an **8 GB VRAM** GPU with a concurrent STT (Whisper) workload.
+
+### Combined VRAM budget
+
+| Workload | Component | Approximate VRAM |
+|---|---|---|
+| **LLM** (Mistral 7B Q4_K_M) | Model weights | 4.5 GB |
+| **LLM** | KV cache @ 4096 ctx | 0.7 GB |
+| **LLM** | CUDA runtime overhead | 0.3 GB |
+| **STT** (Whisper large-v3) | Model weights + activations | ~3.1 GB |
+| **Combined total** | | **~8.6 GB** |
+
+> **Note:** 8.6 GB slightly exceeds an 8 GB card when both services run simultaneously.  
+> Apply the mitigations below to stay within budget.
+
+### Scheduling strategy
+
+The service enforces **sequential GPU access by default** (`MAX_CONCURRENT_REQUESTS=1`).  
+Only one inference request runs at a time; additional requests receive `HTTP 429` immediately and callers are expected to retry after a short delay.  This avoids VRAM spikes from KV-cache allocations for multiple concurrent generations.
+
+To coexist with the STT service:
+
+| Mitigation | How to apply | VRAM saved |
+|---|---|---|
+| Reduce LLM context size | Set `CTX_SIZE=2048` in `.env` | ~0.4 GB (KV cache) |
+| Stagger workloads | Route STT and LLM requests to different time windows at the control-plane layer | Peak overlap eliminated |
+| CUDA MPS | Set `CUDA_MPS_PIPE_DIRECTORY` on the host to share the GPU at the kernel level | Reduces driver overhead |
+| Monitor live | `nvidia-smi dmon -s mu -d 1` | — |
+
+**Recommended baseline** for a shared 8 GB card:
+
+```bash
+CTX_SIZE=2048          # KV cache ~0.4 GB, total LLM ~5.1 GB
+MAX_CONCURRENT_REQUESTS=1  # serialise inference
+```
+
+Expected combined VRAM with these settings: ~5.1 GB (LLM) + ~3.1 GB (STT) = **~8.2 GB**.  
+This stays within an 8 GB card provided the two services are never active simultaneously — a property enforced by `MAX_CONCURRENT_REQUESTS=1` together with an upstream scheduler that drains STT before routing to the LLM (or vice versa).
 
 ---
 
@@ -432,3 +462,59 @@ Key manifest fields:
 | `mounts[1]` | `/data/llm` → `/data/llm` (read-write) | Runtime state, logs, and KV-cache scratch space |
 | `healthCheck.http.path` | `/health` | llama-server health probe; returns `{"status":"ok"}` when ready |
 | `healthCheck.http.port` | `5301` | Published host port (matches `HOST_PORT`) |
+
+---
+
+## Agent assignment
+
+This section documents the provider capabilities and model-naming conventions required for a follow-up chat-platform / control-plane change that routes selected agents to this local LLM.
+
+### Provider capabilities
+
+| Capability | Supported | Notes |
+|---|---|---|
+| Plain chat (`/v1/chat/completions`) | ✅ Yes | OpenAI-compatible; use `"model": "local"` |
+| Text completion (`/v1/completions`) | ✅ Yes | OpenAI-compatible |
+| Embeddings (`/v1/embeddings`) | ✅ Yes | Passed through to llama-server |
+| Streaming SSE (`"stream": true`) | ✅ Yes | Standard OpenAI delta format |
+| `tool_calls` / function calling | ⚠️ Not supported | No native function-calling schema; a shim is required for agents that depend on `tool_calls` |
+| Vision / multimodal | ❌ No | Text-only models (GGUF); no image input support |
+| Fine-grained rate limits per agent | ❌ No | Global `MAX_CONCURRENT_REQUESTS` limit applies to all callers equally |
+
+### Model naming conventions
+
+The wrapper is intentionally model-agnostic.  The chat-platform should use the canonical alias `local` as the `model` field value in all requests — llama-server accepts any string and the wrapper does not validate it:
+
+```json
+{ "model": "local", "messages": [...] }
+```
+
+`GET /v1/models` always returns exactly one entry whose `id` is the loaded GGUF filename (e.g. `mistral-7b-v0.3.Q4_K_M.gguf`).  The chat-platform provider adapter should:
+
+1. Call `GET /v1/models` at startup (or periodically) to discover the canonical model ID.
+2. Cache the result and surface it to agents as `local/<filename>` or simply `local`.
+3. Never hard-code the filename in agent profiles — the loaded model may change via `POST /api/models/load`.
+
+### Recommended agents for the local LLM
+
+The following agent archetypes are well-suited to a quantised 7B model on a shared GPU node:
+
+| Agent type | Rationale |
+|---|---|
+| Internal summarisation / digest | Low latency tolerance; benefits from on-premises processing |
+| Code explanation / review | Strong performance from Mistral 7B class models |
+| Draft / first-pass text generation | Good quality at low token budget (`MAX_TOKENS=2048`) |
+| Classification / routing | Short-context tasks; fast time-to-first-token |
+
+Agents that require **function calling**, **vision input**, or **very long context windows** (> 4096 tokens) should be routed to a cloud provider instead.
+
+### Guardrails applied to every request
+
+The wrapper enforces these limits automatically — no per-agent configuration is required:
+
+| Guardrail | Value (default) | Override via |
+|---|---|---|
+| `max_tokens` cap | 2048 | `MAX_TOKENS` env var |
+| Request timeout | 120 s | `REQUEST_TIMEOUT` env var |
+| Concurrent inference slots | 1 | `MAX_CONCURRENT_REQUESTS` env var |
+| Response when slot is busy | `HTTP 429` with `Retry-After: 5` | — |
