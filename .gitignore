@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+*.env.local
+
+# Pytest
+.pytest_cache/
+.cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
