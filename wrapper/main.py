@@ -215,7 +215,7 @@ async def _on_startup() -> None:
     except Exception as exc:
         log.error("Failed to start llama-server: %s", exc)
         _state["status"] = "error"
-        _state["error"] = str(exc)
+        _state["error"] = "Failed to start llama-server"
         return
 
     ok = await _wait_for_llama()
@@ -292,27 +292,24 @@ async def download_model(
     """
     _require_admin(authorization)
 
-    # Derive destination filename
-    filename = req.filename or Path(req.url.split("?")[0]).name
-    if not filename or filename in {".", ".."}:
+    # Derive destination filename; accept only the bare basename.
+    raw_name = req.filename or Path(req.url.split("?")[0]).name
+    safe_filename = os.path.basename(raw_name)
+    if not safe_filename or safe_filename in {".", ".."}:
         raise HTTPException(
             status_code=400,
             detail="Cannot infer filename from URL; provide 'filename' in the request body",
         )
-    if "/" in filename or "\\" in filename:
+    if safe_filename != raw_name:
         raise HTTPException(status_code=400, detail="filename must not contain path separators")
-    if not filename.lower().endswith(".gguf"):
+    if not safe_filename.lower().endswith(".gguf"):
         raise HTTPException(status_code=400, detail="Destination filename must end with .gguf")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / filename
-    # Guard against path traversal: resolved path must remain inside MODELS_DIR.
-    try:
-        dest.resolve().relative_to(MODELS_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Build destination from the trusted directory and the sanitized basename.
+    dest = MODELS_DIR / safe_filename
     if dest.exists():
-        raise HTTPException(status_code=409, detail=f"Model already exists: {filename}")
+        raise HTTPException(status_code=409, detail=f"Model already exists: {safe_filename}")
 
     free = _free_bytes(MODELS_DIR)
     if free < 1_073_741_824:  # 1 GiB
@@ -328,7 +325,7 @@ async def download_model(
     _downloads[task_id] = {
         "task_id": task_id,
         "status": "pending",
-        "filename": filename,
+        "filename": safe_filename,
         "bytes_downloaded": 0,
         "total_bytes": None,
         "error": None,
@@ -427,22 +424,26 @@ async def load_model(
     """
     _require_admin(authorization)
 
-    if not req.filename.lower().endswith(".gguf"):
+    # Accept only the bare filename — no path separators.
+    safe_filename = os.path.basename(req.filename)
+    if not safe_filename or not safe_filename.lower().endswith(".gguf"):
         raise HTTPException(status_code=400, detail="filename must end with .gguf")
+    if safe_filename != req.filename:
+        raise HTTPException(status_code=400, detail="filename must not contain path separators")
 
-    model_path = MODELS_DIR / req.filename
-    # Guard against path traversal: resolved path must remain inside MODELS_DIR.
-    try:
-        model_path.resolve().relative_to(MODELS_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    if not model_path.exists():
+    # Resolve model path via a directory scan — never construct a path from user
+    # input directly so that the value passed to _start_llama is always trusted.
+    model_path: Optional[Path] = next(
+        (f for f in MODELS_DIR.iterdir() if f.is_file() and f.name == safe_filename),
+        None,
+    )
+    if model_path is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Model not found in {MODELS_DIR}: {req.filename}",
+            detail=f"Model not found in {MODELS_DIR}: {safe_filename}",
         )
 
-    log.info("Switching model to: %s", req.filename)
+    log.info("Switching model to: %s", safe_filename)
     _state["status"] = "loading"
     _state["model"] = str(model_path)
     _state["error"] = None
