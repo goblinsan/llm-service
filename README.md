@@ -139,9 +139,85 @@ Compare the `mem_used` column between STT-idle and STT-active runs to confirm th
 
 ---
 
+## OpenAI API compatibility
+
+llama-server natively exposes `/v1/chat/completions` and `/v1/completions` in OpenAI-compatible format. The table below summarises compatibility with the chat-platform OpenAI provider adapter.
+
+| Feature | Status | Notes |
+|---|---|---|
+| `messages` array format | ✅ Compatible | `role`/`content` fields match the OpenAI schema exactly |
+| `temperature`, `top_p` | ✅ Compatible | Same semantics and value ranges |
+| `max_tokens` | ✅ Compatible | llama-server accepts `max_tokens` as an alias for the native `n_predict` field |
+| `stop` sequences | ✅ Compatible | Accepts the same string array as OpenAI |
+| Streaming SSE (`"stream": true`) | ✅ Compatible | Returns `data: {...}` lines in OpenAI delta format, terminated with `data: [DONE]` |
+| `model` field in responses | ⚠️ Cosmetic difference | llama-server echoes back the model filename (e.g. `mistral-7b-v0.3.Q4_K_M.gguf`) rather than a short alias. The chat-platform adapter ignores this field for routing, so no shim is required. |
+| `tool_calls` / function calling | ⚠️ Not supported | llama-server does not implement the OpenAI `tools` / `tool_calls` response schema. If the chat-platform relies on structured function-calling, a thin proxy shim must be inserted (see note below). |
+| `/v1/models` | ✅ Available | Returns a single-entry list for the loaded model; the chat-platform adapter uses this for model discovery (see [Chat-platform provider](#chat-platform-provider) section). |
+
+### Streaming example
+
+```bash
+curl -sN http://<llm-service-host>:5301/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local",
+    "messages": [{"role": "user", "content": "Count to five."}],
+    "max_tokens": 64,
+    "stream": true
+  }'
+```
+
+Expected: a series of `data: {"choices":[{"delta":{"content":"..."}},...]}` lines ending with `data: [DONE]`.
+
+### tool_calls shim note
+
+If the downstream chat-platform requires `tool_calls` in responses (i.e. structured function-calling), a lightweight reverse-proxy layer (e.g. a small FastAPI or Node.js service) can be introduced between the platform and llama-server to:
+
+1. Parse the model's text output against a function-call grammar.
+2. Re-format the result as an OpenAI-compatible `tool_calls` array before returning it to the caller.
+
+This shim is only needed when function-calling is required; for plain chat and text completion the native llama-server API is fully compatible.
+
+---
+
+## Chat-platform provider
+
+Register this service as an **OpenAI-compatible** provider in the chat-platform settings:
+
+| Setting | Value |
+|---|---|
+| Provider type | `openai-compatible` |
+| Base URL | `http://<llm-service-host>:5301/v1` |
+| API key | *(not required — leave blank or set any non-empty string)* |
+| Default model | `local` *(or the value returned by `GET /v1/models`)* |
+
+> **Note:** Replace `<llm-service-host>` with the hostname or IP of the machine running `docker compose up`. Do **not** commit a private LAN address in repository files; use the placeholder above in docs and config templates.
+
+### /v1/models behaviour
+
+llama-server exposes a `GET /v1/models` endpoint that returns the currently loaded model as a single list entry:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "mistral-7b-v0.3.Q4_K_M.gguf",
+      "object": "model",
+      "created": 1712467200,
+      "owned_by": "llamacpp"
+    }
+  ]
+}
+```
+
+The chat-platform provider adapter calls this endpoint to populate its model picker. Because only one model is loaded at a time, the list will always contain exactly one entry.
+
+---
+
 ## Deployment via gateway-control-plane
 
-This repository is deployable as a `container-service` using `build.strategy: repo-compose`:
+This repository is deployable as a `container-service` using `build.strategy: repo-compose`. The full workload manifest for gateway-control-plane is:
 
 ```yaml
 services:
@@ -150,9 +226,40 @@ services:
     build:
       strategy: repo-compose
       repo: goblinsan/llm-service
+    network:
+      mode: bridge
+    runtime:
+      class: nvidia
     config:
       HOST_PORT: "5301"
       MODEL_PATH: /data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf
       N_GPU_LAYERS: "-1"
       CTX_SIZE: "4096"
+    mounts:
+      - source: /data/models
+        target: /data/models
+        readOnly: true
+      - source: /data/llm
+        target: /data/llm
+        readOnly: false
+    healthCheck:
+      http:
+        path: /health
+        port: 5301
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      startPeriod: 60s
 ```
+
+Key manifest fields:
+
+| Field | Value | Reason |
+|---|---|---|
+| `build.strategy` | `repo-compose` | Instructs the control plane to deploy the `docker-compose.yml` from this repo |
+| `network.mode` | `bridge` | Standard Docker bridge networking; exposes `HOST_PORT` on the host |
+| `runtime.class` | `nvidia` | Enables NVIDIA GPU access inside the container |
+| `mounts[0]` | `/data/models` → `/data/models` (read-only) | GGUF model files |
+| `mounts[1]` | `/data/llm` → `/data/llm` (read-write) | Runtime state, logs, and KV-cache scratch space |
+| `healthCheck.http.path` | `/health` | llama-server health probe; returns `{"status":"ok"}` when ready |
+| `healthCheck.http.port` | `5301` | Published host port (matches `HOST_PORT`) |
