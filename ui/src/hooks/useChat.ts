@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import type { ChatMessage, ChatParams, TurnMetadata } from "../types";
 
-export type ChatStatus = "idle" | "streaming" | "complete" | "error";
+export type ChatStatus = "idle" | "queued" | "streaming" | "complete" | "error";
 
 interface UseChatReturn {
   response: string;
@@ -36,7 +36,7 @@ export function useChat(): UseChatReturn {
       setResponse("");
       setMetadata(null);
       setErrorMessage(null);
-      setStatus("streaming");
+      setStatus("queued");
 
       const t0 = Date.now();
 
@@ -95,6 +95,7 @@ export function useChat(): UseChatReturn {
               usage,
               model: data.model,
               timestamp: t0,
+              streamed: false,
             });
             setStatus("complete");
             return;
@@ -133,6 +134,8 @@ export function useChat(): UseChatReturn {
                 if (delta) {
                   fullContent += delta;
                   setResponse(fullContent);
+                  // Transition from queued → streaming on first token
+                  setStatus("streaming");
                 }
                 if (chunk.model) modelName = chunk.model;
                 if (chunk.usage) {
@@ -164,6 +167,7 @@ export function useChat(): UseChatReturn {
                 : undefined,
             model: modelName,
             timestamp: t0,
+            streamed: true,
           });
           setStatus("complete");
         } catch (err: unknown) {

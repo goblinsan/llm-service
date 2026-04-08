@@ -7,13 +7,20 @@ interface ChatPanelProps {
   chatStatus: ChatStatus;
   errorMessage: string | null;
   onClearHistory: () => void;
+  onRerun?: (turn: Turn) => void;
 }
 
 function formatMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
 }
 
-function TurnView({ turn }: { turn: Turn }) {
+function TurnView({
+  turn,
+  onRerun,
+}: {
+  turn: Turn;
+  onRerun?: (t: Turn) => void;
+}) {
   const userMsg = turn.messages.find((m) => m.role === "user");
   const sysMsg = turn.messages.find((m) => m.role === "system");
   const { metadata } = turn;
@@ -39,7 +46,16 @@ function TurnView({ turn }: { turn: Turn }) {
         </div>
       ) : (
         <div className="bubble bubble-assistant">
-          <span className="role-label">assistant</span>
+          <span className="role-label">
+            assistant
+            <span className="state-badge badge-complete">✓ complete</span>
+            {metadata.streamed === true && (
+              <span className="state-badge badge-streamed">streamed</span>
+            )}
+            {metadata.streamed === false && (
+              <span className="state-badge badge-batch">batch</span>
+            )}
+          </span>
           <pre className="message-content">{turn.response}</pre>
           <div className="turn-meta">
             <span title="Wall-clock latency">⏱ {formatMs(metadata.latency_ms)}</span>
@@ -61,6 +77,15 @@ function TurnView({ turn }: { turn: Turn }) {
             <span className="dim" title="Sent at">
               {new Date(metadata.timestamp).toLocaleTimeString()}
             </span>
+            {onRerun && (
+              <button
+                className="btn-small btn-rerun"
+                onClick={() => onRerun(turn)}
+                title="Rerun this prompt with the same parameters"
+              >
+                ↺ Rerun
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -74,6 +99,7 @@ export function ChatPanel({
   chatStatus,
   errorMessage,
   onClearHistory,
+  onRerun,
 }: ChatPanelProps) {
   const empty = turns.length === 0 && chatStatus === "idle";
 
@@ -99,24 +125,38 @@ export function ChatPanel({
       ) : (
         <div className="turns-list">
           {turns.map((t) => (
-            <TurnView key={t.id} turn={t} />
+            <TurnView key={t.id} turn={t} onRerun={onRerun} />
           ))}
 
-          {/* Live streaming bubble */}
-          {(chatStatus === "streaming" || chatStatus === "complete") &&
-            streamingResponse && (
-              <div className="turn">
-                <div className="bubble bubble-assistant">
-                  <span className="role-label">
-                    assistant
-                    {chatStatus === "streaming" && (
-                      <span className="streaming-badge"> streaming…</span>
-                    )}
-                  </span>
-                  <pre className="message-content">{streamingResponse}</pre>
-                </div>
+          {/* Queued: request sent, awaiting first byte */}
+          {chatStatus === "queued" && (
+            <div className="turn">
+              <div className="bubble bubble-assistant bubble-queued">
+                <span className="role-label">
+                  assistant
+                  <span className="state-badge badge-queued">queued</span>
+                </span>
+                <span className="thinking-dots" aria-label="Thinking">
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                </span>
               </div>
-            )}
+            </div>
+          )}
+
+          {/* Streaming: tokens are arriving */}
+          {chatStatus === "streaming" && (
+            <div className="turn">
+              <div className="bubble bubble-assistant">
+                <span className="role-label">
+                  assistant
+                  <span className="streaming-badge">streaming…</span>
+                </span>
+                <pre className="message-content">{streamingResponse}</pre>
+              </div>
+            </div>
+          )}
 
           {chatStatus === "error" && errorMessage && (
             <div className="turn">

@@ -18,7 +18,15 @@ export function PromptForm({ onSubmit, onCancel, status }: PromptFormProps) {
   const [stream, setStream] = useState(true);
   const [selectedPreset, setSelectedPreset] = useState<string>("");
 
-  const busy = status === "streaming";
+  const busy = status === "streaming" || status === "queued";
+  const busyLabel =
+    status === "queued"
+      ? stream
+        ? "Waiting for first token…"
+        : "Waiting for response…"
+      : stream
+        ? "Streaming…"
+        : "Receiving…";
 
   function applyPreset(preset: PromptPreset) {
     setSelectedPreset(preset.id);
@@ -160,7 +168,7 @@ export function PromptForm({ onSubmit, onCancel, status }: PromptFormProps) {
             Send ↵
           </button>
         )}
-        {busy && <span className="streaming-indicator">Streaming…</span>}
+        {busy && <span className="streaming-indicator">{busyLabel}</span>}
       </div>
     </form>
   );

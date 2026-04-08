@@ -38,6 +38,7 @@ export interface TurnMetadata {
   usage?: TokenUsage;
   model?: string;
   timestamp: number;
+  streamed?: boolean;
 }
 
 export interface Turn {
