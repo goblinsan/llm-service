@@ -1,6 +1,6 @@
 # llm-service
 
-GPU-accelerated LLM inference service built on [llama.cpp](https://github.com/ggerganov/llama.cpp), deployed via Docker Compose with NVIDIA CUDA. Designed to be deployed by **gateway-control-plane** as a `container-service` using `build.strategy: repo-compose`.
+GPU-accelerated LLM inference service built on [llama.cpp](https://github.com/ggml-org/llama.cpp), deployed via Docker Compose with NVIDIA CUDA. Designed to be deployed by **gateway-control-plane** as a `container-service` using `build.strategy: repo-compose`.
 
 ---
 

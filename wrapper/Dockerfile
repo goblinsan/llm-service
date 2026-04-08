@@ -1,4 +1,4 @@
-FROM ghcr.io/ggerganov/llama.cpp:server-cuda
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
 
 # Install Python 3 and pip
 RUN apt-get update && \
