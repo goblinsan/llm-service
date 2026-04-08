@@ -24,7 +24,7 @@ All tunables live in `.env` (copy from `.env.example`):
 | `MODELS_HOST_DIR` | `/data/models` | Host path mounted to `/data/models` inside the container |
 | `LLM_STATE_DIR` | `/data/llm` | Host path mounted to `/data/llm` for wrapper state and downloads |
 | `MODELS_DIR` | `/data/models/llm` | Directory inside the container scanned for GGUF models |
-| `MODEL_PATH` | `/data/models/llm/model.gguf` | Absolute path **inside the container** to the initial GGUF file |
+| `MODEL_PATH` | `/data/models/llm/model.gguf` | Absolute path **inside the container** to the initial GGUF file. If it does not exist yet, the wrapper starts in `no-model` mode so you can download or load a model later. |
 | `N_GPU_LAYERS` | `-1` | Layers offloaded to GPU. `-1` = all (full GPU offload) |
 | `CTX_SIZE` | `4096` | Context window in tokens |
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
@@ -200,6 +200,7 @@ Response (once the new model is ready):
 
 | Phase | `GET /health` response | Inference (`/v1/*`) |
 |---|---|---|
+| No model loaded yet | `{"status":"no-model"}` | HTTP 503 |
 | Model switch in progress | `{"status":"loading"}` | HTTP 503 |
 | New model ready | `{"status":"ok"}` | Normal |
 | New model failed to load | `{"status":"error"}` | HTTP 503 |

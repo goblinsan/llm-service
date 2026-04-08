@@ -16,7 +16,9 @@ ADMIN_TOKEN environment variable is set to a non-empty string.
 Environment variables
 ---------------------
 MODEL_PATH          Path inside the container to the initial GGUF file.
-                    Default: /data/models/llm/model.gguf
+                    If the file does not exist on first boot, the wrapper
+                    starts in "no-model" mode so models can be downloaded
+                    and loaded later. Default: /data/models/llm/model.gguf
 MODELS_DIR          Directory scanned for GGUF files and used as the
                     download destination.
                     Default: /data/models/llm
@@ -132,7 +134,7 @@ _LLAMA_BIN: Optional[str] = _find_llama_bin()
 _state: dict = {
     "process": None,         # subprocess.Popen | None
     "model": INITIAL_MODEL,  # currently active model path
-    "status": "loading",     # "loading" | "ready" | "error"
+    "status": "loading",     # "loading" | "ready" | "error" | "no-model"
     "error": None,           # str | None
 }
 
@@ -261,6 +263,16 @@ async def _on_startup() -> None:
     if _SKIP_LLAMA_STARTUP:
         _state["status"] = "ready"
         log.info("SKIP_LLAMA_STARTUP=1 — skipping llama-server launch (test/dev mode)")
+        return
+
+    if not os.path.isfile(_state["model"]):
+        _state["process"] = None
+        _state["status"] = "no-model"
+        _state["error"] = f"Initial model file not found: {Path(_state['model']).name}"
+        log.warning(
+            "Initial model file is missing (%s); starting in no-model mode",
+            _state["model"],
+        )
         return
 
     _state["status"] = "loading"
@@ -546,11 +558,16 @@ def health() -> Response:
     Returns the current readiness state of the wrapper.
 
     * `{"status":"loading"}` — llama-server is starting or a model switch is in progress.
+    * `{"status":"no-model"}` — the wrapper is healthy but no initial GGUF file exists yet.
     * `{"status":"ok"}`      — llama-server is ready to serve inference requests.
     * `{"status":"error"}`   — llama-server failed to start or become healthy.
     """
     if _state["status"] == "loading":
         return JSONResponse({"status": "loading"})
+    if _state["status"] == "no-model":
+        return JSONResponse(
+            {"status": "no-model", "detail": _state.get("error", "")},
+        )
     if _state["status"] == "error":
         return JSONResponse(
             {"status": "error", "detail": _state.get("error", "")},
@@ -584,6 +601,11 @@ _HOP_BY_HOP = frozenset(
 )
 async def proxy(request: Request, path: str) -> Response:
     """Transparently forward all other requests to llama-server."""
+    if _state["status"] == "no-model":
+        return JSONResponse(
+            {"error": "no model loaded; download or load a GGUF model first"},
+            status_code=503,
+        )
     if _state["status"] != "ready":
         return JSONResponse(
             {"error": "model is loading, please retry later"},
