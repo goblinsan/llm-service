@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ChatMessage, ChatParams, TurnMetadata } from "../types";
 
 export type ChatStatus = "idle" | "queued" | "streaming" | "complete" | "error";
@@ -17,13 +17,13 @@ export function useChat(): UseChatReturn {
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [metadata, setMetadata] = useState<TurnMetadata | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const abortRef = { current: null as AbortController | null };
+  const abortRef = useRef<AbortController | null>(null);
 
   const cancel = useCallback(() => {
     if (abortRef.current) {
       abortRef.current.abort();
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = useCallback(
     (messages: ChatMessage[], params: ChatParams) => {
@@ -182,7 +182,7 @@ export function useChat(): UseChatReturn {
         }
       })();
     },
-    [] // eslint-disable-line react-hooks/exhaustive-deps
+    []
   );
 
   return { response, status, metadata, errorMessage, submit, cancel };
