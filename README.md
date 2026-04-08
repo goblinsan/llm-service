@@ -11,6 +11,8 @@ cp .env.example .env
 # Edit .env: set MODEL_PATH to your GGUF file (see Model Selection below)
 docker compose up -d
 curl http://localhost:5301/health
+# Optional: open the local operator UI
+open http://localhost:5302
 ```
 
 ---
@@ -28,6 +30,7 @@ All tunables live in `.env` (copy from `.env.example`):
 | `N_GPU_LAYERS` | `-1` | Layers offloaded to GPU. `-1` = all (full GPU offload) |
 | `CTX_SIZE` | `4096` | Context window in tokens |
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
+| `UI_PORT` | `5302` | Host port for the local operator UI (nginx container, port 80 internally). The UI proxies `/health`, `/api/*`, and `/v1/*` to the `llm-service` container. |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token required for model management write endpoints. Leave empty to disable auth (dev only). |
 | `LLAMA_BIN` | *(auto-detect)* | Optional absolute path to `llama-server` inside the container. Only set this if the base image places the binary somewhere unusual. |
 | `MAX_TOKENS` | `2048` | Hard cap on `max_tokens` per inference request. Requests that exceed this value (or omit it) are silently clamped. Lower values reduce peak KV-cache VRAM pressure. |
@@ -242,6 +245,56 @@ the `Authorization` header — it must **not** be exposed to end users.
 
 ---
 
+## Local operator UI
+
+> **Scope:** This UI is for **local operator testing only**. It is intentionally not hardened for public access, has no per-user authentication or session isolation, and is not intended to be exposed beyond the operator's LAN. Public authenticated access and per-user sessions belong in **gateway-tools-platform**.
+
+The compose stack ships a second service, `ui`, which is a React/Vite single-page app built into an nginx container. When both services are running, navigate to:
+
+```
+http://<host>:5302
+```
+
+(where `5302` is the default `UI_PORT`; change it in `.env` if needed).
+
+### How the UI connects to the wrapper
+
+The UI container (nginx) proxies all API traffic to the `llm-service` container on the internal Docker network — no CORS configuration is required. Proxied paths:
+
+| UI request path | Forwarded to |
+|---|---|
+| `GET /health` | `llm-service:8080/health` |
+| `GET /api/models` | `llm-service:8080/api/models` |
+| `POST /api/models/download` | `llm-service:8080/api/models/download` |
+| `GET /api/models/download/{task_id}` | `llm-service:8080/api/models/download/{task_id}` |
+| `POST /api/models/load` | `llm-service:8080/api/models/load` |
+| `POST /v1/chat/completions` | `llm-service:8080/v1/chat/completions` |
+| All other paths | Served from nginx static files (`/usr/share/nginx/html`) |
+
+### UI features
+
+| Feature | Description |
+|---|---|
+| Status panel | Live health and loaded-model display; polls `/health` every 5 s |
+| Model inventory | Lists all `.gguf` files from `/api/models`; shows which is loaded |
+| Chat panel | Multi-turn chat with streaming SSE support |
+| Session history | Browser `localStorage`-backed session list (survives page refresh) |
+| Export | Download chat transcript as JSON |
+| System prompt | Per-session system prompt field |
+
+### Boundary with gateway-tools-platform
+
+| Concern | This UI (`llm-service`) | gateway-tools-platform |
+|---|---|---|
+| Target user | Local operator (single person) | End users, agents |
+| Authentication | None (admin token kept in `.env`) | Per-user auth, OAuth/OIDC |
+| Session isolation | None (single shared localStorage) | Per-user sessions |
+| Public exposure | No — LAN / VPN only | Yes |
+| Streaming | Yes (operator convenience) | Yes |
+| Model switching | Yes (operator admin) | No (models fixed per deployment) |
+
+---
+
 ## VRAM coexistence
 
 This service is designed to coexist on an **8 GB VRAM** GPU with a concurrent STT (Whisper) workload.
@@ -420,7 +473,7 @@ The chat-platform provider adapter calls this endpoint to populate its model pic
 
 ## Deployment via gateway-control-plane
 
-This repository is deployable as a `container-service` using `build.strategy: repo-compose`. The wrapper service is built from `./wrapper` so the control-plane must have access to the full repo. The full workload manifest for gateway-control-plane is:
+This repository is deployable as a `container-service` using `build.strategy: repo-compose`. Both services (`llm-service` and `ui`) are built from this repo — the control-plane must have access to the full repo. The full workload manifest for gateway-control-plane is:
 
 ```yaml
 services:
@@ -435,6 +488,7 @@ services:
       class: nvidia
     config:
       HOST_PORT: "5301"
+      UI_PORT: "5302"
       MODEL_PATH: /data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf
       N_GPU_LAYERS: "-1"
       CTX_SIZE: "4096"
@@ -460,13 +514,30 @@ Key manifest fields:
 
 | Field | Value | Reason |
 |---|---|---|
-| `build.strategy` | `repo-compose` | Instructs the control plane to deploy the `docker-compose.yml` from this repo |
-| `network.mode` | `bridge` | Standard Docker bridge networking; exposes `HOST_PORT` on the host |
-| `runtime.class` | `nvidia` | Enables NVIDIA GPU access inside the container |
+| `build.strategy` | `repo-compose` | Instructs the control plane to deploy the `docker-compose.yml` from this repo — both `llm-service` and `ui` services are started |
+| `network.mode` | `bridge` | Standard Docker bridge networking; exposes `HOST_PORT` and `UI_PORT` on the host |
+| `runtime.class` | `nvidia` | Enables NVIDIA GPU access inside the `llm-service` container |
 | `mounts[0]` | `/data/models` → `/data/models` (read-write) | GGUF model files — read-write so that `POST /api/models/download` can write new models |
 | `mounts[1]` | `/data/llm` → `/data/llm` (read-write) | Runtime state, logs, and KV-cache scratch space |
 | `healthCheck.http.path` | `/health` | llama-server health probe; returns `{"status":"ok"}` when ready |
 | `healthCheck.http.port` | `5301` | Published host port (matches `HOST_PORT`) |
+
+### Operator follow-up after initial deploy
+
+After merging and triggering a control-plane deploy, the operator must complete these steps manually:
+
+1. **Register the workload in the control plane.** Add the `llm-service` manifest above to the control-plane's service registry if it is not already present. The control plane will not discover new workloads automatically.
+
+2. **Deploy to the GPU node.** Trigger a deploy from the control-plane UI or CLI targeting the GPU node that has the required VRAM and NVIDIA driver. Confirm the node selector matches the node where `/data/models` and `/data/llm` are provisioned.
+
+3. **Verify the UI container rebuilt successfully.** After the deploy, confirm both containers are running:
+   ```bash
+   # On the GPU node (from the repo directory)
+   docker compose ps
+   ```
+   The `ui` container is built from `./ui` (multi-stage Vite + nginx, requires Node.js 22). If the build fails (e.g. a Node.js version mismatch on the build host), the `llm-service` inference container continues to run — check `docker compose logs ui` for build errors and re-trigger the deploy after fixing them.
+
+4. **Validate the UI is reachable.** Open `http://<node-host>:5302` in a browser and confirm the status panel shows `ok` once a model is loaded.
 
 ---
 

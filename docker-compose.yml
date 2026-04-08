@@ -30,3 +30,11 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
+
+  ui:
+    build: ./ui
+    restart: unless-stopped
+    ports:
+      - "${UI_PORT:-5302}:80"
+    depends_on:
+      - llm-service
