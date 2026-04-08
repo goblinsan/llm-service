@@ -29,6 +29,7 @@ All tunables live in `.env` (copy from `.env.example`):
 | `CTX_SIZE` | `4096` | Context window in tokens |
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token required for model management write endpoints. Leave empty to disable auth (dev only). |
+| `LLAMA_BIN` | *(auto-detect)* | Optional absolute path to `llama-server` inside the container. Only set this if the base image places the binary somewhere unusual. |
 | `MAX_TOKENS` | `2048` | Hard cap on `max_tokens` per inference request. Requests that exceed this value (or omit it) are silently clamped. Lower values reduce peak KV-cache VRAM pressure. |
 | `REQUEST_TIMEOUT` | `120` | Seconds before an in-flight inference request is abandoned and a `504` is returned to the caller. |
 | `MAX_CONCURRENT_REQUESTS` | `1` | Maximum simultaneous inference requests. Additional requests receive `HTTP 429`. Default of `1` serialises inference to avoid starving other GPU workloads. |

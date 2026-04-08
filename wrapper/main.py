@@ -39,6 +39,8 @@ MAX_CONCURRENT_REQUESTS
                     Maximum number of inference requests that may run
                     simultaneously.  Additional requests receive HTTP 429.
                     Default: 1  (serialise, like the STT service)
+LLAMA_BIN           Optional absolute path to the llama-server binary.
+                    Leave unset to auto-detect it in the container image.
 SKIP_LLAMA_STARTUP  Set to "1" to skip launching llama-server (test mode).
 """
 
@@ -91,14 +93,33 @@ _SKIP_LLAMA_STARTUP: bool = os.getenv("SKIP_LLAMA_STARTUP", "0") == "1"
 
 def _find_llama_bin() -> Optional[str]:
     """Locate the llama-server binary (path varies by image version)."""
+    explicit = os.getenv("LLAMA_BIN", "").strip()
+    if explicit:
+        return explicit if os.path.isfile(explicit) and os.access(explicit, os.X_OK) else None
     candidates = [
         shutil.which("llama-server"),
         "/llama-server",
+        "/app/llama-server",
+        "/usr/bin/llama-server",
         "/usr/local/bin/llama-server",
+        "/opt/llama.cpp/bin/llama-server",
+        "/opt/llama.cpp/build/bin/llama-server",
     ]
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
+    for root in ("/app", "/opt", "/usr/local", "/usr"):
+        if not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, _, filenames in os.walk(root):
+                if "llama-server" not in filenames:
+                    continue
+                path = os.path.join(dirpath, "llama-server")
+                if os.access(path, os.X_OK):
+                    return path
+        except OSError:
+            continue
     return None
 
 
@@ -181,7 +202,7 @@ def _start_llama(model_path: str) -> subprocess.Popen:
     if _LLAMA_BIN is None:
         raise RuntimeError(
             "llama-server binary not found. "
-            "Expected at /llama-server or in PATH."
+            "Set LLAMA_BIN explicitly or use an image that ships llama-server."
         )
     # Verify the model file is a real, accessible file before exec-ing.
     # This check also prevents unexpected values from reaching subprocess.

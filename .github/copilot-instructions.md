@@ -29,6 +29,7 @@ This repository provides a wrapper around `llama.cpp` and is intended to be depl
 - Preserve the wrapper's readiness semantics:
   - `/health` returns `loading`, `ok`, or `error`
   - inference requests return `503` while the model is loading
+- Do not hardcode a single upstream `llama-server` binary path unless it is verified in the current base image. Prefer auto-detection plus an explicit `LLAMA_BIN` override.
 - Preserve the concurrency guard and request-timeout behavior unless intentionally changed and documented.
 - Treat download and model-switch endpoints as security-sensitive. Maintain path sanitization and auth requirements.
 
