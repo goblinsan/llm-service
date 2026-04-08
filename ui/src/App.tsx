@@ -150,7 +150,26 @@ export default function App() {
 
       setActiveSession({ ...session });
     },
-    [activeSession, submit] // eslint-disable-line react-hooks/exhaustive-deps
+    [activeSession, submit]
+  );
+
+  // -----------------------------------------------------------------------
+  // Rerun a previous turn with the same user message and current params
+  // -----------------------------------------------------------------------
+
+  const handleRerun = useCallback(
+    (turn: Turn) => {
+      if (!activeSession) return;
+      const userMsg = turn.messages.find((m) => m.role === "user");
+      const sysMsg = turn.messages.find((m) => m.role === "system");
+      if (!userMsg) return;
+      handleSubmit(
+        userMsg.content,
+        sysMsg?.content ?? activeSession.systemPrompt,
+        activeSession.params
+      );
+    },
+    [activeSession, handleSubmit]
   );
 
   // -----------------------------------------------------------------------
@@ -212,6 +231,7 @@ export default function App() {
           chatStatus={status}
           errorMessage={errorMessage}
           onClearHistory={handleClearHistory}
+          onRerun={handleRerun}
         />
 
         <ExportActions session={activeSession} />
