@@ -21,6 +21,9 @@ All tunables live in `.env` (copy from `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
+| `MODELS_HOST_DIR` | `/data/models` | Host path mounted to `/data/models` inside the container |
+| `LLM_STATE_DIR` | `/data/llm` | Host path mounted to `/data/llm` for wrapper state and downloads |
+| `MODELS_DIR` | `/data/models/llm` | Directory inside the container scanned for GGUF models |
 | `MODEL_PATH` | `/data/models/llm/model.gguf` | Absolute path **inside the container** to the initial GGUF file |
 | `N_GPU_LAYERS` | `-1` | Layers offloaded to GPU. `-1` = all (full GPU offload) |
 | `CTX_SIZE` | `4096` | Context window in tokens |
@@ -36,8 +39,8 @@ All tunables live in `.env` (copy from `.env.example`):
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `/data/models` | `/data/models` (read-write) | GGUF model files — read-write so that the download endpoint can place new models |
-| `/data/llm` | `/data/llm` | Runtime state, logs, and cache |
+| `MODELS_HOST_DIR` | `/data/models` (read-write) | GGUF model files — read-write so that the download endpoint can place new models |
+| `LLM_STATE_DIR` | `/data/llm` | Runtime state, logs, and cache |
 
 ---
 

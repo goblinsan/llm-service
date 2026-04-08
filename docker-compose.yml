@@ -5,11 +5,11 @@ services:
     ports:
       - "${HOST_PORT:-5301}:8080"
     volumes:
-      - /data/models:/data/models
-      - /data/llm:/data/llm
+      - "${MODELS_HOST_DIR:-/data/models}:/data/models"
+      - "${LLM_STATE_DIR:-/data/llm}:/data/llm"
     environment:
       MODEL_PATH: ${MODEL_PATH:-/data/models/llm/model.gguf}
-      MODELS_DIR: /data/models/llm
+      MODELS_DIR: ${MODELS_DIR:-/data/models/llm}
       N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
       CTX_SIZE: ${CTX_SIZE:-4096}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
