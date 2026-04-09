@@ -277,6 +277,7 @@ The UI container (nginx) proxies all API traffic to the `llm-service` container 
 |---|---|
 | Status panel | Live health and loaded-model display; polls `/health` every 5 s |
 | Model inventory | Lists all `.gguf` files from `/api/models`; shows which is loaded |
+| Model admin | Operator form for `POST /api/models/download`, download progress polling, and `POST /api/models/load` |
 | Chat panel | Multi-turn chat with streaming SSE support |
 | Session history | Browser `localStorage`-backed session list (survives page refresh) |
 | Export | Download chat transcript as JSON |

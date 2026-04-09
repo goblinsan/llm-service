@@ -19,6 +19,21 @@ export interface ModelsResponse {
   status: string;
 }
 
+export interface DownloadTask {
+  task_id: string;
+  status: "pending" | "downloading" | "done" | "error";
+  filename: string;
+  bytes_downloaded: number;
+  total_bytes: number | null;
+  error: string | null;
+}
+
+export interface LoadResponse {
+  loaded_model: string;
+  status: string;
+  error?: string | null;
+}
+
 export type MessageRole = "system" | "user" | "assistant";
 
 export interface ChatMessage {

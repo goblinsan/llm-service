@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { StatusPanel } from "./components/StatusPanel";
 import { ModelInventory } from "./components/ModelInventory";
+import { ModelAdminPanel } from "./components/ModelAdminPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { PromptForm } from "./components/PromptForm";
 import { SessionHistory } from "./components/SessionHistory";
@@ -224,6 +225,12 @@ export default function App() {
             onRefresh={refreshModels}
           />
         </div>
+
+        <ModelAdminPanel
+          models={models?.models ?? []}
+          loadedModel={models?.loaded_model ?? ""}
+          onChanged={handleRefresh}
+        />
 
         <ChatPanel
           turns={activeSession?.turns ?? []}

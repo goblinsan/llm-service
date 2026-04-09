@@ -13,6 +13,8 @@ This repository provides a wrapper around `llama.cpp` and is intended to be depl
   - `POST /api/models/download`
   - `GET /api/models/download/{task_id}`
   - `POST /api/models/load`
+- The local operator UI must expose those model-management endpoints directly.
+  A read-only inventory is not sufficient.
 
 ## Configuration rules
 
@@ -44,5 +46,6 @@ This repository provides a wrapper around `llama.cpp` and is intended to be depl
 Before considering a task complete, prefer verifying:
 
 - Python syntax for `wrapper/`
+- `npm run build` for `ui/`
 - README examples still match the implemented endpoints
 - Compose/env wiring still matches the documented deployment flow

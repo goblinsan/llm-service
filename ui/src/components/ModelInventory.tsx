@@ -28,8 +28,8 @@ export function ModelInventory({
       </div>
       {models.length === 0 ? (
         <p className="dim">
-          No GGUF files found in the models directory. Use{" "}
-          <code>POST /api/models/download</code> to download one.
+          No GGUF files found in the models directory yet. Use the Model admin
+          panel below to download one.
         </p>
       ) : (
         <table className="model-table">
@@ -61,9 +61,9 @@ export function ModelInventory({
       )}
       {models.length > 0 && (
         <p className="dim hint">
-          To switch models use{" "}
-          <code>POST /api/models/load {"{"}"filename":"…"{"}"}</code> (requires
-          admin token). Reload this page after switching.
+          Use the Model admin panel below to switch models or kick off new
+          downloads. The wrapper will move through <code>loading</code> while a
+          new model is starting.
         </p>
       )}
       <p className="dim hint" style={{ marginTop: 4 }}>

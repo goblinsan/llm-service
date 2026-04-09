@@ -297,6 +297,64 @@ code {
   min-width: 0;
 }
 
+.model-admin {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.model-admin__download {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-admin__task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--code-bg);
+}
+
+.model-admin__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-admin__list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.model-admin__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.model-admin__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-admin__meta strong {
+  color: var(--text-h);
+  word-break: break-word;
+}
+
 .model-table {
   width: 100%;
   border-collapse: collapse;
