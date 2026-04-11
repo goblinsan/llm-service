@@ -392,11 +392,13 @@ export function ModelAdminPanel({
               <button
                 className="btn-small"
                 type="button"
-                disabled={loadingFilename === model.filename || activeModelName === model.filename}
+                disabled={loadingFilename === model.filename}
                 onClick={() => handleLoad(model.filename)}
               >
                 {activeModelName === model.filename
-                  ? "Active"
+                  ? loadingFilename === model.filename
+                    ? "Reloading…"
+                    : "Reload"
                   : loadingFilename === model.filename
                     ? "Loading…"
                     : "Load"}
