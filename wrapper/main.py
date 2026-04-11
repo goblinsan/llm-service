@@ -425,7 +425,12 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(connect=30.0, read=DOWNLOAD_READ_TIMEOUT),
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=DOWNLOAD_READ_TIMEOUT,
+                write=DOWNLOAD_READ_TIMEOUT,
+                pool=30.0,
+            ),
         ) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
