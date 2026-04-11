@@ -2,14 +2,23 @@ import { useState } from "react";
 import type { ChatParams, PromptPreset } from "../types";
 import { DEFAULT_PRESETS } from "../types";
 import type { ChatStatus } from "../hooks/useChat";
+import type { HealthStatus } from "../types";
 
 interface PromptFormProps {
   onSubmit: (userMessage: string, systemPrompt: string, params: ChatParams) => void;
   onCancel: () => void;
   status: ChatStatus;
+  healthStatus: HealthStatus;
+  activeModelName: string;
 }
 
-export function PromptForm({ onSubmit, onCancel, status }: PromptFormProps) {
+export function PromptForm({
+  onSubmit,
+  onCancel,
+  status,
+  healthStatus,
+  activeModelName,
+}: PromptFormProps) {
   const [systemPrompt, setSystemPrompt] = useState("You are a helpful assistant.");
   const [userMessage, setUserMessage] = useState("");
   const [model, setModel] = useState("local");
@@ -19,6 +28,7 @@ export function PromptForm({ onSubmit, onCancel, status }: PromptFormProps) {
   const [selectedPreset, setSelectedPreset] = useState<string>("");
 
   const busy = status === "streaming" || status === "queued";
+  const blockedByModel = healthStatus === "no-model" || healthStatus === "loading";
   const busyLabel =
     status === "queued"
       ? stream
@@ -163,13 +173,25 @@ export function PromptForm({ onSubmit, onCancel, status }: PromptFormProps) {
           <button
             type="submit"
             className="btn btn-submit"
-            disabled={!userMessage.trim()}
+            disabled={!userMessage.trim() || blockedByModel}
           >
-            Send ↵
+            {healthStatus === "no-model"
+              ? "Load a model first"
+              : healthStatus === "loading"
+                ? "Model loading…"
+                : "Send ↵"}
           </button>
         )}
         {busy && <span className="streaming-indicator">{busyLabel}</span>}
       </div>
+
+      {blockedByModel && (
+        <p className="hint">
+          {healthStatus === "no-model"
+            ? "Use the model setup panel above to download and load a GGUF model before chatting."
+            : `The service is loading ${activeModelName || "the selected model"}. Chat will unlock once /health returns ok.`}
+        </p>
+      )}
     </form>
   );
 }

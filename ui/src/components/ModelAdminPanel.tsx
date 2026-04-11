@@ -7,6 +7,56 @@ interface ModelAdminPanelProps {
   onChanged: () => void;
 }
 
+interface StarterModel {
+  id: string;
+  name: string;
+  publisher: string;
+  filename: string;
+  quantization: string;
+  approxSize: string;
+  approxVram: string;
+  summary: string;
+  url: string;
+  recommended?: boolean;
+}
+
+const STARTER_MODELS: StarterModel[] = [
+  {
+    id: "mistral-7b-v03-q4km",
+    name: "Mistral 7B v0.3",
+    publisher: "TheBloke",
+    filename: "mistral-7b-v0.3.Q4_K_M.gguf",
+    quantization: "Q4_K_M",
+    approxSize: "~4.5 GB",
+    approxVram: "~5.2 GB @ 4k ctx",
+    summary: "Recommended default for a shared 8 GB GPU. Strong general-purpose quality and broad community support.",
+    url: "https://huggingface.co/TheBloke/Mistral-7B-v0.3-GGUF/resolve/main/mistral-7b-v0.3.Q4_K_M.gguf",
+    recommended: true,
+  },
+  {
+    id: "llama-31-8b-q4km",
+    name: "Llama 3.1 8B Instruct",
+    publisher: "bartowski",
+    filename: "Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    quantization: "Q4_K_M",
+    approxSize: "~5.0 GB",
+    approxVram: "~5.7 GB @ 4k ctx",
+    summary: "A good stronger general alternative if you can spare a bit more VRAM.",
+    url: "https://huggingface.co/bartowski/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+  },
+  {
+    id: "qwen25-7b-q4km",
+    name: "Qwen 2.5 7B Instruct",
+    publisher: "bartowski",
+    filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+    quantization: "Q4_K_M",
+    approxSize: "~4.5 GB",
+    approxVram: "~5.2 GB @ 4k ctx",
+    summary: "Best starter choice when you care about multilingual prompts and output.",
+    url: "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+  },
+];
+
 function formatBytes(value: number | null): string {
   if (value === null) return "—";
   if (value < 1024) return `${value} B`;
@@ -75,11 +125,17 @@ export function ModelAdminPanel({
     [loadedModel]
   );
 
-  async function handleDownload(e: React.FormEvent) {
-    e.preventDefault();
+  async function startDownload(url: string, filename?: string) {
     setMessage(null);
     setError(null);
     setDownloadTask(null);
+
+    const trimmedUrl = url.trim();
+    const trimmedFilename = filename?.trim();
+    if (!trimmedUrl) {
+      setError("Provide a GGUF download URL");
+      return;
+    }
 
     try {
       const res = await fetch("/api/models/download", {
@@ -89,8 +145,8 @@ export function ModelAdminPanel({
           ...buildAuthHeader(adminToken),
         },
         body: JSON.stringify({
-          url: downloadUrl.trim(),
-          filename: downloadFilename.trim() || undefined,
+          url: trimmedUrl,
+          filename: trimmedFilename || undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -98,12 +154,17 @@ export function ModelAdminPanel({
         throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       }
       setDownloadTask(data as DownloadTask);
+      setMessage(`Started download for ${(data as DownloadTask).filename}`);
       setDownloadUrl("");
       setDownloadFilename("");
-      setMessage(`Started download for ${(data as DownloadTask).filename}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start download");
     }
+  }
+
+  async function handleDownload(e: React.FormEvent) {
+    e.preventDefault();
+    await startDownload(downloadUrl, downloadFilename);
   }
 
   async function handleLoad(filename: string) {
@@ -151,9 +212,66 @@ export function ModelAdminPanel({
           placeholder="Bearer token for model management"
           autoComplete="off"
         />
+        <p className="hint">
+          The token stays in this browser session only. It is required for model downloads and model switching.
+        </p>
+      </div>
+
+      <div className="model-admin__starter">
+        <div className="model-admin__list-head">
+          <span>Starter models</span>
+          <span className="dim">Quick-install a known GGUF</span>
+        </div>
+        <div className="model-admin__catalog">
+          {STARTER_MODELS.map((model) => (
+            <article
+              key={model.id}
+              className={`model-admin__catalog-card ${model.recommended ? "model-admin__catalog-card--recommended" : ""}`}
+            >
+              <div className="model-admin__catalog-head">
+                <div>
+                  <strong>{model.name}</strong>
+                  <div className="dim">{model.publisher}</div>
+                </div>
+                {model.recommended ? <span className="badge badge-active">recommended</span> : null}
+              </div>
+              <p className="model-admin__catalog-copy">{model.summary}</p>
+              <div className="model-admin__catalog-meta">
+                <span>{model.quantization}</span>
+                <span>{model.approxSize}</span>
+                <span>{model.approxVram}</span>
+              </div>
+              <div className="model-admin__catalog-actions">
+                <button
+                  className="btn-small"
+                  type="button"
+                  onClick={() => void startDownload(model.url, model.filename)}
+                >
+                  Download
+                </button>
+                <button
+                  className="btn-small"
+                  type="button"
+                  onClick={() => {
+                    setDownloadUrl(model.url);
+                    setDownloadFilename(model.filename);
+                    setMessage(`Prefilled ${model.name}. Review the URL below or download immediately.`);
+                    setError(null);
+                  }}
+                >
+                  Fill form
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
       </div>
 
       <form className="model-admin__download" onSubmit={handleDownload}>
+        <div className="model-admin__list-head">
+          <span>Custom download</span>
+          <span className="dim">Paste any direct GGUF URL</span>
+        </div>
         <div className="form-row">
           <label htmlFor="download-url">Download URL</label>
           <input

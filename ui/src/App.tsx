@@ -189,6 +189,10 @@ export default function App() {
     refreshModels();
   }
 
+  const activeModelName = models?.loaded_model
+    ? models.loaded_model.split("/").pop() || models.loaded_model
+    : "";
+
   return (
     <div className="app-layout">
       <SessionHistory
@@ -226,6 +230,23 @@ export default function App() {
           />
         </div>
 
+        {health?.status === "no-model" && (
+          <section className="panel setup-callout">
+            <div className="setup-callout__copy">
+              <h2>Load your first model</h2>
+              <p>
+                The wrapper is healthy, but no GGUF is loaded yet. Use the model setup panel below to
+                download a starter model and make it active before sending chat prompts.
+              </p>
+            </div>
+            <ol className="setup-callout__steps">
+              <li>Paste the admin token for this node.</li>
+              <li>Download a starter GGUF like Mistral 7B Q4_K_M.</li>
+              <li>Click <strong>Load</strong> once the download finishes.</li>
+            </ol>
+          </section>
+        )}
+
         <ModelAdminPanel
           models={models?.models ?? []}
           loadedModel={models?.loaded_model ?? ""}
@@ -247,6 +268,8 @@ export default function App() {
           onSubmit={handleSubmit}
           onCancel={cancel}
           status={status}
+          healthStatus={health?.status ?? "loading"}
+          activeModelName={activeModelName}
         />
       </main>
     </div>
