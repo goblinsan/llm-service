@@ -457,17 +457,17 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
     except httpx.RequestError as exc:
         tmp.unlink(missing_ok=True)
         info["status"] = "error"
-        info["error"] = "Download failed: network error"
+        info["error"] = f"Download failed: network error ({exc.__class__.__name__}: {exc})"
         log.error("Model download failed (task=%s): network error", task_id, exc_info=True)
-    except OSError:
+    except OSError as exc:
         tmp.unlink(missing_ok=True)
         info["status"] = "error"
-        info["error"] = "Download failed: disk write error"
+        info["error"] = f"Download failed: disk write error ({exc.__class__.__name__}: {exc})"
         log.error("Model download failed (task=%s): disk write error", task_id, exc_info=True)
-    except Exception:
+    except Exception as exc:
         tmp.unlink(missing_ok=True)
         info["status"] = "error"
-        info["error"] = "Download failed: unexpected error"
+        info["error"] = f"Download failed: unexpected error ({exc.__class__.__name__}: {exc})"
         log.error("Model download failed (task=%s)", task_id, exc_info=True)
 
 
