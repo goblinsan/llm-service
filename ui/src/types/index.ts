@@ -3,6 +3,7 @@ export type HealthStatus = "ok" | "loading" | "no-model" | "error";
 export interface HealthResponse {
   status: HealthStatus;
   detail?: string;
+  ctx_size?: number;
 }
 
 export interface ModelEntry {
@@ -16,6 +17,7 @@ export interface ModelEntry {
 export interface ModelsResponse {
   models: ModelEntry[];
   loaded_model: string;
+  ctx_size: number;
   status: string;
 }
 
@@ -30,6 +32,7 @@ export interface DownloadTask {
 
 export interface LoadResponse {
   loaded_model: string;
+  ctx_size?: number;
   status: string;
   error?: string | null;
 }

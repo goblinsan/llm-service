@@ -250,6 +250,7 @@ export default function App() {
         <ModelAdminPanel
           models={models?.models ?? []}
           loadedModel={models?.loaded_model ?? ""}
+          currentCtxSize={models?.ctx_size ?? health?.ctx_size ?? 4096}
           onChanged={handleRefresh}
         />
 

@@ -64,7 +64,7 @@ from typing import Optional
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -83,7 +83,7 @@ MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", "/data/models/llm"))
 ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
 LLAMA_PORT: int = int(os.getenv("LLAMA_PORT", "8081"))
 N_GPU_LAYERS: str = os.getenv("N_GPU_LAYERS", "-1")
-CTX_SIZE: str = os.getenv("CTX_SIZE", "4096")
+INITIAL_CTX_SIZE: int = int(os.getenv("CTX_SIZE", "4096"))
 INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
 LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
 DOWNLOAD_READ_TIMEOUT: float = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "300"))
@@ -134,6 +134,7 @@ _LLAMA_BIN: Optional[str] = _find_llama_bin()
 _state: dict = {
     "process": None,         # subprocess.Popen | None
     "model": INITIAL_MODEL,  # currently active model path
+    "ctx_size": INITIAL_CTX_SIZE,
     "status": "loading",     # "loading" | "ready" | "error" | "no-model"
     "error": None,           # str | None
 }
@@ -200,7 +201,7 @@ def _require_admin(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing admin token")
 
 
-def _start_llama(model_path: str) -> subprocess.Popen:
+def _start_llama(model_path: str, ctx_size: int) -> subprocess.Popen:
     if _LLAMA_BIN is None:
         raise RuntimeError(
             "llama-server binary not found. "
@@ -214,7 +215,7 @@ def _start_llama(model_path: str) -> subprocess.Popen:
         _LLAMA_BIN,
         "--model", model_path,
         "--n-gpu-layers", N_GPU_LAYERS,
-        "--ctx-size", CTX_SIZE,
+        "--ctx-size", str(ctx_size),
         "--host", "127.0.0.1",
         "--port", str(LLAMA_PORT),
     ]
@@ -277,7 +278,7 @@ async def _on_startup() -> None:
 
     _state["status"] = "loading"
     try:
-        proc = _start_llama(_state["model"])
+        proc = _start_llama(_state["model"], int(_state["ctx_size"]))
         _state["process"] = proc
     except Exception as exc:
         log.error("Failed to start llama-server: %s", exc)
@@ -324,6 +325,7 @@ def list_models() -> dict:
     return {
         "models": models,
         "loaded_model": _state["model"],
+        "ctx_size": _state["ctx_size"],
         "status": _state["status"],
     }
 
@@ -474,6 +476,7 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
 
 class LoadRequest(BaseModel):
     filename: str  # filename within MODELS_DIR, e.g. "mistral-7b-v0.3.Q4_K_M.gguf"
+    ctx_size: Optional[int] = Field(default=None, ge=256, le=262144)
 
 
 @app.post("/api/models/load", summary="Switch active model (admin)")
@@ -520,11 +523,12 @@ async def load_model(
     log.info("Switching model to: %s", safe_filename)
     _state["status"] = "loading"
     _state["model"] = str(model_path)
+    _state["ctx_size"] = req.ctx_size or int(_state["ctx_size"]) or INITIAL_CTX_SIZE
     _state["error"] = None
 
     _stop_llama()
     try:
-        proc = _start_llama(str(model_path))
+        proc = _start_llama(str(model_path), int(_state["ctx_size"]))
         _state["process"] = proc
     except Exception as exc:
         _state["status"] = "error"
@@ -532,6 +536,7 @@ async def load_model(
         log.error("Failed to start llama-server with model %s: %s", req.filename, exc)
         return {
             "loaded_model": _state["model"],
+            "ctx_size": _state["ctx_size"],
             "status": _state["status"],
             "error": _state["error"],
         }
@@ -543,6 +548,7 @@ async def load_model(
 
     return {
         "loaded_model": _state["model"],
+        "ctx_size": _state["ctx_size"],
         "status": _state["status"],
         "error": _state.get("error"),
     }
@@ -563,17 +569,25 @@ def health() -> Response:
     * `{"status":"error"}`   — llama-server failed to start or become healthy.
     """
     if _state["status"] == "loading":
-        return JSONResponse({"status": "loading"})
+        return JSONResponse({"status": "loading", "ctx_size": _state["ctx_size"]})
     if _state["status"] == "no-model":
         return JSONResponse(
-            {"status": "no-model", "detail": _state.get("error", "")},
+            {
+                "status": "no-model",
+                "detail": _state.get("error", ""),
+                "ctx_size": _state["ctx_size"],
+            },
         )
     if _state["status"] == "error":
         return JSONResponse(
-            {"status": "error", "detail": _state.get("error", "")},
+            {
+                "status": "error",
+                "detail": _state.get("error", ""),
+                "ctx_size": _state["ctx_size"],
+            },
             status_code=503,
         )
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "ctx_size": _state["ctx_size"]})
 
 # ---------------------------------------------------------------------------
 # Transparent reverse proxy for all llama-server endpoints

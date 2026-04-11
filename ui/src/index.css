@@ -344,6 +344,15 @@ code {
   gap: 6px;
 }
 
+.model-admin__runtime {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--code-bg);
+}
+
 .model-admin__starter {
   display: flex;
   flex-direction: column;

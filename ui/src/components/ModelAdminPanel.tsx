@@ -4,6 +4,7 @@ import type { DownloadTask, LoadResponse, ModelEntry } from "../types";
 interface ModelAdminPanelProps {
   models: ModelEntry[];
   loadedModel: string;
+  currentCtxSize: number;
   onChanged: () => void;
 }
 
@@ -15,6 +16,8 @@ interface StarterModel {
   quantization: string;
   approxSize: string;
   approxVram: string;
+  weightVramGb: number;
+  kvCache4kGb: number;
   summary: string;
   url: string;
   recommended?: boolean;
@@ -29,6 +32,8 @@ const STARTER_MODELS: StarterModel[] = [
     quantization: "Q4_K_M",
     approxSize: "~4.5 GB",
     approxVram: "~5.2 GB @ 4k ctx",
+    weightVramGb: 4.5,
+    kvCache4kGb: 0.7,
     summary: "Recommended default for a shared 8 GB GPU. Strong general-purpose quality and broad community support.",
     url: "https://huggingface.co/TheBloke/Mistral-7B-v0.3-GGUF/resolve/main/mistral-7b-v0.3.Q4_K_M.gguf",
     recommended: true,
@@ -41,6 +46,8 @@ const STARTER_MODELS: StarterModel[] = [
     quantization: "Q4_K_M",
     approxSize: "~5.0 GB",
     approxVram: "~5.7 GB @ 4k ctx",
+    weightVramGb: 5.0,
+    kvCache4kGb: 0.7,
     summary: "A good stronger general alternative if you can spare a bit more VRAM.",
     url: "https://huggingface.co/bartowski/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
   },
@@ -52,6 +59,8 @@ const STARTER_MODELS: StarterModel[] = [
     quantization: "Q4_K_M",
     approxSize: "~4.5 GB",
     approxVram: "~5.2 GB @ 4k ctx",
+    weightVramGb: 4.5,
+    kvCache4kGb: 0.7,
     summary: "Best starter choice when you care about multilingual prompts and output.",
     url: "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
   },
@@ -69,14 +78,34 @@ function buildAuthHeader(token: string): HeadersInit {
   return token.trim() ? { Authorization: `Bearer ${token.trim()}` } : {};
 }
 
+function formatCtx(value: number): string {
+  return `${value.toLocaleString()} ctx`;
+}
+
+function estimateInstalledModelVram(model: ModelEntry, ctxSize: number): number {
+  const weightGb = model.size_bytes / 1024 ** 3;
+  const kvAt4kGb = Math.max(0.4, Math.min(3.5, weightGb * 0.14));
+  return weightGb + kvAt4kGb * (ctxSize / 4096);
+}
+
+function estimateStarterVram(model: StarterModel, ctxSize: number): number {
+  return model.weightVramGb + model.kvCache4kGb * (ctxSize / 4096);
+}
+
+function formatVramEstimate(valueGb: number): string {
+  return `~${valueGb.toFixed(1)} GB VRAM`;
+}
+
 export function ModelAdminPanel({
   models,
   loadedModel,
+  currentCtxSize,
   onChanged,
 }: ModelAdminPanelProps) {
   const [adminToken, setAdminToken] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFilename, setDownloadFilename] = useState("");
+  const [ctxSize, setCtxSize] = useState(currentCtxSize);
   const [downloadTask, setDownloadTask] = useState<DownloadTask | null>(null);
   const [loadingFilename, setLoadingFilename] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -94,6 +123,10 @@ export function ModelAdminPanel({
       sessionStorage.removeItem("llm_admin_token");
     }
   }, [adminToken]);
+
+  useEffect(() => {
+    setCtxSize(currentCtxSize);
+  }, [currentCtxSize]);
 
   useEffect(() => {
     if (!downloadTask) return;
@@ -178,7 +211,7 @@ export function ModelAdminPanel({
           "Content-Type": "application/json",
           ...buildAuthHeader(adminToken),
         },
-        body: JSON.stringify({ filename }),
+        body: JSON.stringify({ filename, ctx_size: ctxSize }),
       });
       const data = (await res.json().catch(() => ({}))) as LoadResponse & {
         detail?: string;
@@ -186,7 +219,7 @@ export function ModelAdminPanel({
       if (!res.ok) {
         throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       }
-      setMessage(`Switched active model to ${filename}`);
+      setMessage(`Switched active model to ${filename} at ${ctxSize.toLocaleString()} tokens`);
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load model");
@@ -217,10 +250,32 @@ export function ModelAdminPanel({
         </p>
       </div>
 
+      <div className="model-admin__runtime">
+        <div className="form-row">
+          <label htmlFor="ctx-size">Context size</label>
+          <input
+            id="ctx-size"
+            className="input input-number"
+            type="number"
+            min={256}
+            max={262144}
+            step={256}
+            value={ctxSize}
+            onChange={(e) => {
+              const parsed = Number.parseInt(e.target.value || String(currentCtxSize), 10);
+              setCtxSize(Number.isFinite(parsed) ? Math.max(256, parsed) : currentCtxSize);
+            }}
+          />
+        </div>
+        <p className="hint">
+          This applies on the next <strong>Load</strong>. VRAM estimates below are rough and scale with the selected context size.
+        </p>
+      </div>
+
       <div className="model-admin__starter">
         <div className="model-admin__list-head">
           <span>Starter models</span>
-          <span className="dim">Quick-install a known GGUF</span>
+          <span className="dim">Quick-install a known GGUF at {formatCtx(ctxSize)}</span>
         </div>
         <div className="model-admin__catalog">
           {STARTER_MODELS.map((model) => (
@@ -239,7 +294,7 @@ export function ModelAdminPanel({
               <div className="model-admin__catalog-meta">
                 <span>{model.quantization}</span>
                 <span>{model.approxSize}</span>
-                <span>{model.approxVram}</span>
+                <span>{formatVramEstimate(estimateStarterVram(model, ctxSize))}</span>
               </div>
               <div className="model-admin__catalog-actions">
                 <button
@@ -318,7 +373,7 @@ export function ModelAdminPanel({
       <div className="model-admin__list">
         <div className="model-admin__list-head">
           <span>Installed models</span>
-          <span className="dim">Loaded: {activeModelName || "none"}</span>
+          <span className="dim">Loaded: {activeModelName || "none"} · {formatCtx(ctxSize)}</span>
         </div>
         {models.length === 0 ? (
           <p className="dim">No models downloaded yet.</p>
@@ -329,6 +384,9 @@ export function ModelAdminPanel({
                 <strong>{model.filename}</strong>
                 <span className="dim">
                   {model.quantization || "unknown quant"} · {formatBytes(model.size_bytes)}
+                </span>
+                <span className="dim">
+                  {formatVramEstimate(estimateInstalledModelVram(model, ctxSize))}
                 </span>
               </div>
               <button

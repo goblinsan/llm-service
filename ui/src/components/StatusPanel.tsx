@@ -35,6 +35,7 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
   const loadedModel = models?.loaded_model
     ? models.loaded_model.split("/").pop()
     : "—";
+  const ctxSize = models?.ctx_size ?? health?.ctx_size ?? "—";
 
   return (
     <section className="panel status-panel">
@@ -62,6 +63,10 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
           <tr>
             <th>Models found</th>
             <td>{models?.models.length ?? "—"}</td>
+          </tr>
+          <tr>
+            <th>Context</th>
+            <td>{typeof ctxSize === "number" ? `${ctxSize.toLocaleString()} tokens` : ctxSize}</td>
           </tr>
         </tbody>
       </table>
