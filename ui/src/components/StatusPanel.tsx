@@ -36,6 +36,7 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
     ? models.loaded_model.split("/").pop()
     : "—";
   const ctxSize = models?.ctx_size ?? health?.ctx_size ?? "—";
+  const gpuLayers = models?.n_gpu_layers ?? health?.n_gpu_layers ?? "—";
 
   return (
     <section className="panel status-panel">
@@ -67,6 +68,10 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
           <tr>
             <th>Context</th>
             <td>{typeof ctxSize === "number" ? `${ctxSize.toLocaleString()} tokens` : ctxSize}</td>
+          </tr>
+          <tr>
+            <th>GPU layers</th>
+            <td>{typeof gpuLayers === "number" ? gpuLayers : gpuLayers}</td>
           </tr>
         </tbody>
       </table>

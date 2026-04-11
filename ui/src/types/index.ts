@@ -4,6 +4,7 @@ export interface HealthResponse {
   status: HealthStatus;
   detail?: string;
   ctx_size?: number;
+  n_gpu_layers?: number;
 }
 
 export interface ModelEntry {
@@ -18,6 +19,7 @@ export interface ModelsResponse {
   models: ModelEntry[];
   loaded_model: string;
   ctx_size: number;
+  n_gpu_layers: number;
   status: string;
 }
 
@@ -33,6 +35,7 @@ export interface DownloadTask {
 export interface LoadResponse {
   loaded_model: string;
   ctx_size?: number;
+  n_gpu_layers?: number;
   status: string;
   error?: string | null;
 }

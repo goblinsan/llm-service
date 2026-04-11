@@ -83,7 +83,7 @@ log = logging.getLogger(__name__)
 MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", "/data/models/llm"))
 ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
 LLAMA_PORT: int = int(os.getenv("LLAMA_PORT", "8081"))
-N_GPU_LAYERS: str = os.getenv("N_GPU_LAYERS", "-1")
+INITIAL_N_GPU_LAYERS: int = int(os.getenv("N_GPU_LAYERS", "-1"))
 INITIAL_CTX_SIZE: int = int(os.getenv("CTX_SIZE", "4096"))
 INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
 LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
@@ -136,6 +136,7 @@ _state: dict = {
     "process": None,         # subprocess.Popen | None
     "model": INITIAL_MODEL,  # currently active model path
     "ctx_size": INITIAL_CTX_SIZE,
+    "n_gpu_layers": INITIAL_N_GPU_LAYERS,
     "status": "loading",     # "loading" | "ready" | "error" | "no-model"
     "error": None,           # str | None
 }
@@ -202,7 +203,7 @@ def _require_admin(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing admin token")
 
 
-def _start_llama(model_path: str, ctx_size: int) -> subprocess.Popen:
+def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subprocess.Popen:
     if _LLAMA_BIN is None:
         raise RuntimeError(
             "llama-server binary not found. "
@@ -215,7 +216,7 @@ def _start_llama(model_path: str, ctx_size: int) -> subprocess.Popen:
     cmd = [
         _LLAMA_BIN,
         "--model", model_path,
-        "--n-gpu-layers", N_GPU_LAYERS,
+        "--n-gpu-layers", str(n_gpu_layers),
         "--ctx-size", str(ctx_size),
         "--host", "127.0.0.1",
         "--port", str(LLAMA_PORT),
@@ -279,7 +280,11 @@ async def _on_startup() -> None:
 
     _state["status"] = "loading"
     try:
-        proc = _start_llama(_state["model"], int(_state["ctx_size"]))
+        proc = _start_llama(
+            _state["model"],
+            int(_state["ctx_size"]),
+            int(_state["n_gpu_layers"]),
+        )
         _state["process"] = proc
     except Exception as exc:
         log.error("Failed to start llama-server: %s", exc)
@@ -327,6 +332,7 @@ def list_models() -> dict:
         "models": models,
         "loaded_model": _state["model"] if _state["status"] in {"ready", "loading"} else "",
         "ctx_size": _state["ctx_size"],
+        "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
     }
 
@@ -483,6 +489,7 @@ async def _do_download(task_id: str, url: str, dest: Path) -> None:
 class LoadRequest(BaseModel):
     filename: str  # filename within MODELS_DIR, e.g. "mistral-7b-v0.3.Q4_K_M.gguf"
     ctx_size: Optional[int] = Field(default=None, ge=256, le=262144)
+    n_gpu_layers: Optional[int] = Field(default=None, ge=-1, le=200)
 
 
 @app.post("/api/models/load", summary="Switch active model (admin)")
@@ -530,11 +537,20 @@ async def load_model(
     _state["status"] = "loading"
     _state["model"] = str(model_path)
     _state["ctx_size"] = req.ctx_size or int(_state["ctx_size"]) or INITIAL_CTX_SIZE
+    _state["n_gpu_layers"] = (
+        req.n_gpu_layers
+        if req.n_gpu_layers is not None
+        else int(_state["n_gpu_layers"])
+    )
     _state["error"] = None
 
     _stop_llama()
     try:
-        proc = _start_llama(str(model_path), int(_state["ctx_size"]))
+        proc = _start_llama(
+            str(model_path),
+            int(_state["ctx_size"]),
+            int(_state["n_gpu_layers"]),
+        )
         _state["process"] = proc
     except Exception as exc:
         _state["status"] = "error"
@@ -543,6 +559,7 @@ async def load_model(
         return {
             "loaded_model": _state["model"],
             "ctx_size": _state["ctx_size"],
+            "n_gpu_layers": _state["n_gpu_layers"],
             "status": _state["status"],
             "error": _state["error"],
         }
@@ -555,6 +572,7 @@ async def load_model(
     return {
         "loaded_model": _state["model"],
         "ctx_size": _state["ctx_size"],
+        "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
         "error": _state.get("error"),
     }
@@ -582,6 +600,7 @@ async def unload_model(
     return {
         "loaded_model": "",
         "ctx_size": _state["ctx_size"],
+        "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
         "error": _state["error"],
     }
@@ -602,13 +621,18 @@ def health() -> Response:
     * `{"status":"error"}`   — llama-server failed to start or become healthy.
     """
     if _state["status"] == "loading":
-        return JSONResponse({"status": "loading", "ctx_size": _state["ctx_size"]})
+        return JSONResponse({
+            "status": "loading",
+            "ctx_size": _state["ctx_size"],
+            "n_gpu_layers": _state["n_gpu_layers"],
+        })
     if _state["status"] == "no-model":
         return JSONResponse(
             {
                 "status": "no-model",
                 "detail": _state.get("error", ""),
                 "ctx_size": _state["ctx_size"],
+                "n_gpu_layers": _state["n_gpu_layers"],
             },
         )
     if _state["status"] == "error":
@@ -617,10 +641,15 @@ def health() -> Response:
                 "status": "error",
                 "detail": _state.get("error", ""),
                 "ctx_size": _state["ctx_size"],
+                "n_gpu_layers": _state["n_gpu_layers"],
             },
             status_code=503,
         )
-    return JSONResponse({"status": "ok", "ctx_size": _state["ctx_size"]})
+    return JSONResponse({
+        "status": "ok",
+        "ctx_size": _state["ctx_size"],
+        "n_gpu_layers": _state["n_gpu_layers"],
+    })
 
 # ---------------------------------------------------------------------------
 # Transparent reverse proxy for all llama-server endpoints

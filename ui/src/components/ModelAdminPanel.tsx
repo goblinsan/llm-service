@@ -5,6 +5,7 @@ interface ModelAdminPanelProps {
   models: ModelEntry[];
   loadedModel: string;
   currentCtxSize: number;
+  currentGpuLayers: number;
   onChanged: () => void;
 }
 
@@ -100,12 +101,14 @@ export function ModelAdminPanel({
   models,
   loadedModel,
   currentCtxSize,
+  currentGpuLayers,
   onChanged,
 }: ModelAdminPanelProps) {
   const [adminToken, setAdminToken] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFilename, setDownloadFilename] = useState("");
   const [ctxSize, setCtxSize] = useState(currentCtxSize);
+  const [gpuLayers, setGpuLayers] = useState(currentGpuLayers);
   const [downloadTask, setDownloadTask] = useState<DownloadTask | null>(null);
   const [loadingFilename, setLoadingFilename] = useState<string | null>(null);
   const [unloading, setUnloading] = useState(false);
@@ -128,6 +131,10 @@ export function ModelAdminPanel({
   useEffect(() => {
     setCtxSize(currentCtxSize);
   }, [currentCtxSize]);
+
+  useEffect(() => {
+    setGpuLayers(currentGpuLayers);
+  }, [currentGpuLayers]);
 
   useEffect(() => {
     if (!downloadTask) return;
@@ -212,7 +219,7 @@ export function ModelAdminPanel({
           "Content-Type": "application/json",
           ...buildAuthHeader(adminToken),
         },
-        body: JSON.stringify({ filename, ctx_size: ctxSize }),
+        body: JSON.stringify({ filename, ctx_size: ctxSize, n_gpu_layers: gpuLayers }),
       });
       const data = (await res.json().catch(() => ({}))) as LoadResponse & {
         detail?: string;
@@ -220,7 +227,9 @@ export function ModelAdminPanel({
       if (!res.ok) {
         throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       }
-      setMessage(`Switched active model to ${filename} at ${ctxSize.toLocaleString()} tokens`);
+      setMessage(
+        `Switched active model to ${filename} at ${ctxSize.toLocaleString()} tokens with ${gpuLayers} GPU layers`
+      );
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load model");
@@ -294,8 +303,24 @@ export function ModelAdminPanel({
             }}
           />
         </div>
+        <div className="form-row">
+          <label htmlFor="gpu-layers">GPU layers</label>
+          <input
+            id="gpu-layers"
+            className="input input-number"
+            type="number"
+            min={-1}
+            max={200}
+            step={1}
+            value={gpuLayers}
+            onChange={(e) => {
+              const parsed = Number.parseInt(e.target.value || String(currentGpuLayers), 10);
+              setGpuLayers(Number.isFinite(parsed) ? Math.max(-1, parsed) : currentGpuLayers);
+            }}
+          />
+        </div>
         <p className="hint">
-          This applies on the next <strong>Load</strong>. VRAM estimates below are rough and scale with the selected context size.
+          This applies on the next <strong>Load</strong>. Use <code>-1</code> for full/automatic offload, or try a smaller positive number like <code>16</code> or <code>20</code> when the node cannot fit the whole model on GPU.
         </p>
       </div>
 
@@ -400,7 +425,7 @@ export function ModelAdminPanel({
       <div className="model-admin__list">
         <div className="model-admin__list-head">
           <span>Installed models</span>
-          <span className="dim">Loaded: {activeModelName || "none"} · {formatCtx(ctxSize)}</span>
+          <span className="dim">Loaded: {activeModelName || "none"} · {formatCtx(ctxSize)} · {gpuLayers} GPU layers</span>
         </div>
         {models.length === 0 ? (
           <p className="dim">No models downloaded yet.</p>

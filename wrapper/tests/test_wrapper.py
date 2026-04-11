@@ -29,11 +29,13 @@ def reset_state(tmp_path):
     original_model = m._state["model"]
     original_status = m._state["status"]
     original_ctx_size = m._state["ctx_size"]
+    original_n_gpu_layers = m._state["n_gpu_layers"]
 
     m.MODELS_DIR = tmp_path
     m._state["status"] = "ready"
     m._state["model"] = str(tmp_path / "default.gguf")
     m._state["ctx_size"] = 4096
+    m._state["n_gpu_layers"] = -1
     m._state["error"] = None
     m._downloads.clear()
 
@@ -43,6 +45,7 @@ def reset_state(tmp_path):
     m._state["model"] = original_model
     m._state["status"] = original_status
     m._state["ctx_size"] = original_ctx_size
+    m._state["n_gpu_layers"] = original_n_gpu_layers
     m._state["error"] = None
     m._downloads.clear()
 
@@ -88,13 +91,13 @@ class TestHealth:
         m._state["status"] = "ready"
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "ctx_size": 4096}
+        assert resp.json() == {"status": "ok", "ctx_size": 4096, "n_gpu_layers": -1}
 
     def test_loading(self, client):
         m._state["status"] = "loading"
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "loading", "ctx_size": 4096}
+        assert resp.json() == {"status": "loading", "ctx_size": 4096, "n_gpu_layers": -1}
 
     def test_error(self, client):
         m._state["status"] = "error"
@@ -322,16 +325,17 @@ class TestLoadModel:
         ):
             resp = client.post(
                 "/api/models/load",
-                json={"filename": "new-model.gguf", "ctx_size": 8192},
+                json={"filename": "new-model.gguf", "ctx_size": 8192, "n_gpu_layers": 20},
                 headers=ADMIN_HDR,
             )
-            mock_start.assert_called_once_with(str(new_model), 8192)
+            mock_start.assert_called_once_with(str(new_model), 8192, 20)
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ready"
         assert "new-model.gguf" in body["loaded_model"]
         assert body["ctx_size"] == 8192
+        assert body["n_gpu_layers"] == 20
 
     def test_returns_error_when_llama_unhealthy(self, client, reset_state):
         models_dir: Path = reset_state
@@ -355,6 +359,16 @@ class TestLoadModel:
         body = resp.json()
         assert body["status"] == "error"
         assert body["error"] is not None
+
+    def test_unloads_active_model(self, client):
+        with patch("main._stop_llama") as mock_stop:
+            resp = client.post("/api/models/unload", headers=ADMIN_HDR)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "no-model"
+        assert body["loaded_model"] == ""
+        mock_stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

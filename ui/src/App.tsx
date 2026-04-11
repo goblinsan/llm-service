@@ -251,6 +251,7 @@ export default function App() {
           models={models?.models ?? []}
           loadedModel={models?.loaded_model ?? ""}
           currentCtxSize={models?.ctx_size ?? health?.ctx_size ?? 4096}
+          currentGpuLayers={models?.n_gpu_layers ?? health?.n_gpu_layers ?? -1}
           onChanged={handleRefresh}
         />
 
