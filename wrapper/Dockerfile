@@ -1,4 +1,7 @@
-FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+# Pin to an older official CUDA image revision. The floating `server-cuda`
+# tag currently fails CUDA init on the RTX 4060 node with driver 550 / CUDA 12.4,
+# causing llama.cpp to ignore --n-gpu-layers and run on CPU instead.
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b4890
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV VIRTUAL_ENV=/opt/venv
