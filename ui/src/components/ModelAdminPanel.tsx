@@ -108,6 +108,7 @@ export function ModelAdminPanel({
   const [ctxSize, setCtxSize] = useState(currentCtxSize);
   const [downloadTask, setDownloadTask] = useState<DownloadTask | null>(null);
   const [loadingFilename, setLoadingFilename] = useState<string | null>(null);
+  const [unloading, setUnloading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -225,6 +226,32 @@ export function ModelAdminPanel({
       setError(err instanceof Error ? err.message : "Failed to load model");
     } finally {
       setLoadingFilename(null);
+    }
+  }
+
+  async function handleUnload() {
+    setUnloading(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/models/unload", {
+        method: "POST",
+        headers: {
+          ...buildAuthHeader(adminToken),
+        },
+      });
+      const data = (await res.json().catch(() => ({}))) as LoadResponse & {
+        detail?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      }
+      setMessage("Unloaded active model. The next load will bring it back into VRAM.");
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to unload model");
+    } finally {
+      setUnloading(false);
     }
   }
 
@@ -392,7 +419,7 @@ export function ModelAdminPanel({
               <button
                 className="btn-small"
                 type="button"
-                disabled={loadingFilename === model.filename}
+                disabled={loadingFilename === model.filename || unloading}
                 onClick={() => handleLoad(model.filename)}
               >
                 {activeModelName === model.filename
@@ -403,6 +430,16 @@ export function ModelAdminPanel({
                     ? "Loading…"
                     : "Load"}
               </button>
+              {activeModelName === model.filename ? (
+                <button
+                  className="btn-small"
+                  type="button"
+                  disabled={loadingFilename === model.filename || unloading}
+                  onClick={() => void handleUnload()}
+                >
+                  {unloading ? "Unloading…" : "Unload"}
+                </button>
+              ) : null}
             </div>
           ))
         )}

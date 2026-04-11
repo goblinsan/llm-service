@@ -7,6 +7,7 @@ Manages a llama-server subprocess and exposes additional REST endpoints:
   POST /api/models/download           - download a new GGUF model  (admin)
   GET  /api/models/download/{task_id} - poll download progress
   POST /api/models/load               - switch active model         (admin)
+  POST /api/models/unload             - unload active model         (admin)
   GET  /health                        - readiness probe
   *    /*                             - transparent proxy to llama-server
 
@@ -324,7 +325,7 @@ def list_models() -> dict:
             )
     return {
         "models": models,
-        "loaded_model": _state["model"],
+        "loaded_model": _state["model"] if _state["status"] in {"ready", "loading"} else "",
         "ctx_size": _state["ctx_size"],
         "status": _state["status"],
     }
@@ -556,6 +557,33 @@ async def load_model(
         "ctx_size": _state["ctx_size"],
         "status": _state["status"],
         "error": _state.get("error"),
+    }
+
+
+@app.post("/api/models/unload", summary="Unload the active model (admin)")
+async def unload_model(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """Stop llama-server and release the currently active model from service state."""
+    _require_admin(authorization)
+
+    had_model = _state["status"] in {"ready", "loading"} and bool(_state["model"])
+    previous_model = _state["model"]
+    _stop_llama()
+    _state["model"] = ""
+    _state["status"] = "no-model"
+    _state["error"] = "Model unloaded by operator" if had_model else "No model loaded"
+
+    log.info(
+        "Model unloaded%s",
+        f": {Path(previous_model).name}" if previous_model else "",
+    )
+
+    return {
+        "loaded_model": "",
+        "ctx_size": _state["ctx_size"],
+        "status": _state["status"],
+        "error": _state["error"],
     }
 
 # ---------------------------------------------------------------------------
