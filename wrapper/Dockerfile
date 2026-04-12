@@ -9,6 +9,7 @@ ARG LLAMA_CPP_REF=3fc65063d9c356510b86fc2f15ca8aea711bfc47
 FROM ${CUDA_DEVEL_IMAGE} AS llama-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG LLAMA_CPP_REF
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
