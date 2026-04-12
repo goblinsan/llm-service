@@ -482,6 +482,12 @@ class TestBuiltinTools:
         assert "time" in result
         assert "local" in result
 
+    def test_location_candidates_expand_us_state_abbreviation(self):
+        candidates = m._location_search_candidates("clearwater, fl")
+        assert candidates[0] == "clearwater, fl"
+        assert "clearwater, Florida" in candidates
+        assert "clearwater, Florida, United States" in candidates
+
     def test_time_tool_resolves_location(self):
         with patch(
             "main._resolve_location_timezone",
@@ -491,6 +497,47 @@ class TestBuiltinTools:
 
         assert result["timezone"] == "America/New_York"
         assert result["resolved_location"] == "Clearwater, Florida, United States"
+
+    def test_resolve_location_timezone_retries_with_expanded_state(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        calls = []
+
+        async def fake_get(url, params=None, headers=None):
+            calls.append(params["name"])
+            if params["name"] == "clearwater, fl":
+                return FakeResponse({"results": []})
+            return FakeResponse(
+                {
+                    "results": [
+                        {
+                            "name": "Clearwater",
+                            "admin1": "Florida",
+                            "country": "United States",
+                            "timezone": "America/New_York",
+                        }
+                    ]
+                }
+            )
+
+        fake_client = AsyncMock()
+        fake_client.get = AsyncMock(side_effect=fake_get)
+        fake_client.__aenter__.return_value = fake_client
+        fake_client.__aexit__.return_value = None
+
+        with patch("main.httpx.AsyncClient", return_value=fake_client):
+            result = asyncio.run(m._resolve_location_timezone("clearwater, fl"))
+
+        assert calls[:2] == ["clearwater, fl", "clearwater, Florida"]
+        assert result["timezone"] == "America/New_York"
 
     def test_direct_time_handler_uses_location_hint(self):
         with patch(

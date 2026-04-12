@@ -206,6 +206,59 @@ _DDG_SNIPPET_RE = re.compile(
     r'<a[^>]+class="result__snippet"[^>]*>(?P<snippet>.*?)</a>|<div[^>]+class="result__snippet"[^>]*>(?P<snippet_div>.*?)</div>',
     re.IGNORECASE | re.DOTALL,
 )
+_US_STATE_ABBREVIATIONS = {
+    "al": "Alabama",
+    "ak": "Alaska",
+    "az": "Arizona",
+    "ar": "Arkansas",
+    "ca": "California",
+    "co": "Colorado",
+    "ct": "Connecticut",
+    "de": "Delaware",
+    "fl": "Florida",
+    "ga": "Georgia",
+    "hi": "Hawaii",
+    "id": "Idaho",
+    "il": "Illinois",
+    "in": "Indiana",
+    "ia": "Iowa",
+    "ks": "Kansas",
+    "ky": "Kentucky",
+    "la": "Louisiana",
+    "me": "Maine",
+    "md": "Maryland",
+    "ma": "Massachusetts",
+    "mi": "Michigan",
+    "mn": "Minnesota",
+    "ms": "Mississippi",
+    "mo": "Missouri",
+    "mt": "Montana",
+    "ne": "Nebraska",
+    "nv": "Nevada",
+    "nh": "New Hampshire",
+    "nj": "New Jersey",
+    "nm": "New Mexico",
+    "ny": "New York",
+    "nc": "North Carolina",
+    "nd": "North Dakota",
+    "oh": "Ohio",
+    "ok": "Oklahoma",
+    "or": "Oregon",
+    "pa": "Pennsylvania",
+    "ri": "Rhode Island",
+    "sc": "South Carolina",
+    "sd": "South Dakota",
+    "tn": "Tennessee",
+    "tx": "Texas",
+    "ut": "Utah",
+    "vt": "Vermont",
+    "va": "Virginia",
+    "wa": "Washington",
+    "wv": "West Virginia",
+    "wi": "Wisconsin",
+    "wy": "Wyoming",
+    "dc": "District of Columbia",
+}
 
 _TOOL_PROMPT_TEMPLATE = """Built-in tools are available for this conversation.
 
@@ -419,6 +472,27 @@ def _normalise_search_url(url: str) -> str:
     return html.unescape(url)
 
 
+def _location_search_candidates(location: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", location.strip(" .")).strip()
+    if not cleaned:
+        return []
+    candidates = [cleaned]
+    parts = [part.strip() for part in cleaned.split(",")]
+    if len(parts) >= 2:
+        state_token = re.sub(r"[^a-z]", "", parts[-1].lower())
+        full_state = _US_STATE_ABBREVIATIONS.get(state_token)
+        if full_state:
+            expanded = ", ".join([*parts[:-1], full_state])
+            if expanded not in candidates:
+                candidates.append(expanded)
+            expanded_us = f"{expanded}, United States"
+            if expanded_us not in candidates:
+                candidates.append(expanded_us)
+    elif cleaned.lower() not in candidates:
+        candidates.append(cleaned.lower())
+    return candidates
+
+
 async def _perform_web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     params = {"q": query}
     headers = {"User-Agent": "Mozilla/5.0 (llm-service web search)"}
@@ -449,25 +523,31 @@ async def _perform_web_search(query: str, max_results: int = 5) -> dict[str, Any
 
 
 async def _resolve_location_timezone(location: str) -> dict[str, str]:
-    params = {"name": location, "count": 1, "language": "en", "format": "json"}
     headers = {"User-Agent": "Mozilla/5.0 (llm-service geocoding)"}
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0),
         follow_redirects=True,
     ) as client:
-        response = await client.get("https://geocoding-api.open-meteo.com/v1/search", params=params, headers=headers)
-        response.raise_for_status()
-    payload = response.json()
-    results = payload.get("results")
-    if not isinstance(results, list) or not results:
-        raise ValueError(f"Could not resolve location '{location}'")
-    first = results[0]
-    timezone = first.get("timezone")
-    if not isinstance(timezone, str) or not timezone:
-        raise ValueError(f"No timezone found for '{location}'")
-    parts = [first.get("name"), first.get("admin1"), first.get("country")]
-    label = ", ".join([part for part in parts if isinstance(part, str) and part])
-    return {"timezone": timezone, "resolved_location": label or location}
+        for candidate in _location_search_candidates(location):
+            params = {"name": candidate, "count": 1, "language": "en", "format": "json"}
+            response = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params=params,
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            results = payload.get("results")
+            if not isinstance(results, list) or not results:
+                continue
+            first = results[0]
+            timezone = first.get("timezone")
+            if not isinstance(timezone, str) or not timezone:
+                continue
+            parts = [first.get("name"), first.get("admin1"), first.get("country")]
+            label = ", ".join([part for part in parts if isinstance(part, str) and part])
+            return {"timezone": timezone, "resolved_location": label or candidate}
+    raise ValueError(f"Could not resolve location '{location}'")
 
 
 async def _perform_web_read(url: str) -> dict[str, str]:
