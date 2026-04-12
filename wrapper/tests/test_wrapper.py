@@ -466,6 +466,16 @@ class TestBuiltinTools:
             "arguments": {"url": "https://example.com"},
         }
 
+    def test_parse_tool_call_accepts_gemma_alt_syntax(self):
+        parsed = m._parse_tool_call(
+            '<|tool_call>call:web_search{"query":"next US holiday"}',
+            {"enabled": True, "time": False, "web_search": True},
+        )
+        assert parsed == {
+            "name": "web_search",
+            "arguments": {"query": "next US holiday"},
+        }
+
     def test_time_tool_returns_date_and_time(self):
         result = asyncio.run(m._time_tool_result({}))
         assert "date" in result

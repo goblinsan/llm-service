@@ -192,6 +192,10 @@ _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\/(\d+)\s+layers\s+to\s+GPU", re.IGN
 _FLASH_ATTN_RE = re.compile(r"flash_attn\s*=\s*(\d+)", re.IGNORECASE)
 _CUDA_DEVICE_RE = re.compile(r"using device\s+([A-Z0-9_]+)\s+\((.+?)\)\s+-\s+(\d+)\s+MiB free", re.IGNORECASE)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.IGNORECASE | re.DOTALL)
+_ALT_TOOL_CALL_RE = re.compile(
+    r"<\|tool_call\>\s*call:(?P<name>[a-zA-Z0-9_]+)\s*(?P<arguments>\{.*\})",
+    re.IGNORECASE | re.DOTALL,
+)
 _TIME_INTENT_RE = re.compile(r"\b(time|date|today|day|timezone|clock)\b", re.IGNORECASE)
 _TIME_LOCATION_RE = re.compile(r"\b(?:i am|i'm|im)\s+in\s+([a-z0-9 ,.\-]+)$", re.IGNORECASE)
 _DDG_RESULT_RE = re.compile(
@@ -369,16 +373,24 @@ def _merge_usage(total: dict[str, int], usage: Any) -> None:
 
 def _parse_tool_call(text: str, config: dict[str, bool]) -> Optional[dict[str, Any]]:
     match = _TOOL_CALL_RE.search(text)
-    if not match:
-        return None
-    try:
-        payload = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    name = payload.get("name")
-    arguments = payload.get("arguments", {})
+    if match:
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        name = payload.get("name")
+        arguments = payload.get("arguments", {})
+    else:
+        alt_match = _ALT_TOOL_CALL_RE.search(text)
+        if not alt_match:
+            return None
+        name = alt_match.group("name")
+        try:
+            arguments = json.loads(alt_match.group("arguments"))
+        except json.JSONDecodeError:
+            return None
     if not isinstance(name, str) or not isinstance(arguments, dict):
         return None
     allowed = set()
