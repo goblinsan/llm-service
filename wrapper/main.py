@@ -185,6 +185,9 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 _QUANT_RE = re.compile(r"\b(Q\d+[_A-Z0-9]*)\b", re.IGNORECASE)
+_OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\/(\d+)\s+layers\s+to\s+GPU", re.IGNORECASE)
+_FLASH_ATTN_RE = re.compile(r"flash_attn\s*=\s*(\d+)", re.IGNORECASE)
+_CUDA_DEVICE_RE = re.compile(r"using device\s+([A-Z0-9_]+)\s+\((.+?)\)\s+-\s+(\d+)\s+MiB free", re.IGNORECASE)
 
 
 def _parse_quant(filename: str) -> Optional[str]:
@@ -236,6 +239,38 @@ def _describe_llama_failure(timeout: Optional[int] = None) -> str:
     if _llama_log_tail:
         return _llama_log_tail[-1]
     return "llama-server failed to start"
+
+
+def _get_llama_diagnostics() -> dict:
+    diagnostics: dict[str, object] = {
+        "offloaded_layers": None,
+        "total_layers": None,
+        "flash_attn": None,
+        "cuda_device": None,
+        "cuda_device_name": None,
+        "cuda_free_mib_at_load": None,
+        "recent_log_tail": list(_llama_log_tail)[-20:],
+    }
+
+    for line in _llama_log_tail:
+        offload_match = _OFFLOAD_RE.search(line)
+        if offload_match:
+            diagnostics["offloaded_layers"] = int(offload_match.group(1))
+            diagnostics["total_layers"] = int(offload_match.group(2))
+            continue
+
+        flash_attn_match = _FLASH_ATTN_RE.search(line)
+        if flash_attn_match:
+            diagnostics["flash_attn"] = flash_attn_match.group(1) == "1"
+            continue
+
+        cuda_device_match = _CUDA_DEVICE_RE.search(line)
+        if cuda_device_match:
+            diagnostics["cuda_device"] = cuda_device_match.group(1)
+            diagnostics["cuda_device_name"] = cuda_device_match.group(2)
+            diagnostics["cuda_free_mib_at_load"] = int(cuda_device_match.group(3))
+
+    return diagnostics
 
 
 def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subprocess.Popen:
@@ -384,6 +419,7 @@ def list_models() -> dict:
         "ctx_size": _state["ctx_size"],
         "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
+        "llama": _get_llama_diagnostics(),
     }
 
 
@@ -612,6 +648,7 @@ async def load_model(
             "n_gpu_layers": _state["n_gpu_layers"],
             "status": _state["status"],
             "error": _state["error"],
+            "llama": _get_llama_diagnostics(),
         }
 
     ok, detail = await _wait_for_llama()
@@ -625,6 +662,7 @@ async def load_model(
         "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
         "error": _state.get("error"),
+        "llama": _get_llama_diagnostics(),
     }
 
 
@@ -653,6 +691,7 @@ async def unload_model(
         "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
         "error": _state["error"],
+        "llama": _get_llama_diagnostics(),
     }
 
 # ---------------------------------------------------------------------------
@@ -675,6 +714,7 @@ def health() -> Response:
             "status": "loading",
             "ctx_size": _state["ctx_size"],
             "n_gpu_layers": _state["n_gpu_layers"],
+            "llama": _get_llama_diagnostics(),
         })
     if _state["status"] == "no-model":
         return JSONResponse(
@@ -683,6 +723,7 @@ def health() -> Response:
                 "detail": _state.get("error", ""),
                 "ctx_size": _state["ctx_size"],
                 "n_gpu_layers": _state["n_gpu_layers"],
+                "llama": _get_llama_diagnostics(),
             },
         )
     if _state["status"] == "error":
@@ -692,6 +733,7 @@ def health() -> Response:
                 "detail": _state.get("error", ""),
                 "ctx_size": _state["ctx_size"],
                 "n_gpu_layers": _state["n_gpu_layers"],
+                "llama": _get_llama_diagnostics(),
             },
             status_code=503,
         )
@@ -699,6 +741,7 @@ def health() -> Response:
         "status": "ok",
         "ctx_size": _state["ctx_size"],
         "n_gpu_layers": _state["n_gpu_layers"],
+        "llama": _get_llama_diagnostics(),
     })
 
 # ---------------------------------------------------------------------------

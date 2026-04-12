@@ -1,10 +1,21 @@
 export type HealthStatus = "ok" | "loading" | "no-model" | "error";
 
+export interface LlamaDiagnostics {
+  offloaded_layers?: number | null;
+  total_layers?: number | null;
+  flash_attn?: boolean | null;
+  cuda_device?: string | null;
+  cuda_device_name?: string | null;
+  cuda_free_mib_at_load?: number | null;
+  recent_log_tail?: string[];
+}
+
 export interface HealthResponse {
   status: HealthStatus;
   detail?: string;
   ctx_size?: number;
   n_gpu_layers?: number;
+  llama?: LlamaDiagnostics;
 }
 
 export interface ModelEntry {
@@ -21,6 +32,7 @@ export interface ModelsResponse {
   ctx_size: number;
   n_gpu_layers: number;
   status: string;
+  llama?: LlamaDiagnostics;
 }
 
 export interface DownloadTask {
@@ -38,6 +50,7 @@ export interface LoadResponse {
   n_gpu_layers?: number;
   status: string;
   error?: string | null;
+  llama?: LlamaDiagnostics;
 }
 
 export type MessageRole = "system" | "user" | "assistant";

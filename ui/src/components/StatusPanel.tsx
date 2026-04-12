@@ -37,6 +37,21 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
     : "—";
   const ctxSize = models?.ctx_size ?? health?.ctx_size ?? "—";
   const gpuLayers = models?.n_gpu_layers ?? health?.n_gpu_layers ?? "—";
+  const llama = models?.llama ?? health?.llama ?? null;
+  const offloadedLayers =
+    typeof llama?.offloaded_layers === "number" && typeof llama?.total_layers === "number"
+      ? `${llama.offloaded_layers}/${llama.total_layers}`
+      : "—";
+  const flashAttn =
+    typeof llama?.flash_attn === "boolean" ? (llama.flash_attn ? "enabled" : "disabled") : "—";
+  const loadGpu =
+    llama?.cuda_device_name && typeof llama?.cuda_free_mib_at_load === "number"
+      ? `${llama.cuda_device_name} (${llama.cuda_free_mib_at_load.toLocaleString()} MiB free at load)`
+      : llama?.cuda_device_name || "—";
+  const lastLlamaLine =
+    Array.isArray(llama?.recent_log_tail) && llama.recent_log_tail.length > 0
+      ? llama.recent_log_tail[llama.recent_log_tail.length - 1]
+      : null;
 
   return (
     <section className="panel status-panel">
@@ -73,6 +88,24 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
             <th>GPU layers</th>
             <td>{typeof gpuLayers === "number" ? gpuLayers : gpuLayers}</td>
           </tr>
+          <tr>
+            <th>GPU offload</th>
+            <td>{offloadedLayers}</td>
+          </tr>
+          <tr>
+            <th>Flash attention</th>
+            <td>{flashAttn}</td>
+          </tr>
+          <tr>
+            <th>Load GPU</th>
+            <td>{loadGpu}</td>
+          </tr>
+          {lastLlamaLine ? (
+            <tr>
+              <th>Last llama log</th>
+              <td title={lastLlamaLine}>{lastLlamaLine}</td>
+            </tr>
+          ) : null}
         </tbody>
       </table>
     </section>
