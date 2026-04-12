@@ -32,7 +32,9 @@ RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/refs/heads/${LLAMA
       -DBUILD_SHARED_LIBS=ON && \
     cmake --build build --target llama-server -j"$(nproc)" && \
     mkdir -p /tmp/llama-dist && \
-    cp build/bin/llama-server /tmp/llama-dist/ && \
+    LLAMA_SERVER_BIN="$(find build -type f -name llama-server | head -n 1)" && \
+    test -n "$LLAMA_SERVER_BIN" && \
+    install -m 0755 "$LLAMA_SERVER_BIN" /tmp/llama-dist/llama-server && \
     find build \( -type f -o -type l \) \( -name 'libllama.so*' -o -name 'libggml*.so*' \) -exec cp -P {} /tmp/llama-dist/ \;
 
 FROM ${CUDA_RUNTIME_IMAGE}
