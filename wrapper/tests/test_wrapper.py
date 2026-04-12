@@ -498,6 +498,23 @@ class TestBuiltinTools:
         assert result["timezone"] == "America/New_York"
         assert result["resolved_location"] == "Clearwater, Florida, United States"
 
+    def test_time_tool_falls_back_to_client_timezone_when_geocoding_fails(self):
+        with patch(
+            "main._resolve_location_timezone",
+            new=AsyncMock(side_effect=ValueError("Could not resolve")),
+        ):
+            result = asyncio.run(
+                m._time_tool_result(
+                    {
+                        "location": "clearwater, fl",
+                        "client_timezone": "America/New_York",
+                    }
+                )
+            )
+
+        assert result["timezone"] == "America/New_York"
+        assert result["resolved_location"] == "clearwater, fl"
+
     def test_resolve_location_timezone_retries_with_expanded_state(self):
         class FakeResponse:
             def __init__(self, payload):
@@ -578,6 +595,31 @@ class TestBuiltinTools:
         )
 
         assert response is None
+
+    def test_direct_time_handler_uses_client_timezone_for_my_timezone(self):
+        with patch(
+            "main._time_tool_result",
+            new=AsyncMock(
+                return_value={
+                    "local": "2026-04-12T18:28:14-04:00",
+                    "timezone": "America/New_York",
+                    "date": "2026-04-12",
+                    "time": "18:28:14",
+                }
+            ),
+        ) as mock_time:
+            response = asyncio.run(
+                m._maybe_handle_direct_time_request(
+                    {
+                        "model": "local",
+                        "messages": [{"role": "user", "content": "what is the time in my timezone"}],
+                    },
+                    {"enabled": True, "time": True, "web_search": False, "client_timezone": "America/New_York"},
+                )
+            )
+
+        assert response is not None
+        mock_time.assert_awaited_once_with({"timezone": "America/New_York"})
 
     def test_tool_loop_executes_search_then_read_then_returns_final_answer(self):
         first = {

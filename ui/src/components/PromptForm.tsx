@@ -56,6 +56,7 @@ export function PromptForm({
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!userMessage.trim()) return;
+    const clientTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
     onSubmit(userMessage, systemPrompt, {
       model,
       temperature,
@@ -65,6 +66,7 @@ export function PromptForm({
         enabled: toolsEnabled,
         time: toolsEnabled && timeToolEnabled,
         web_search: toolsEnabled && webSearchEnabled,
+        client_timezone: toolsEnabled ? clientTimezone : undefined,
       },
     });
   }

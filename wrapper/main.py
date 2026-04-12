@@ -362,15 +362,17 @@ def _get_llama_diagnostics() -> dict:
     return diagnostics
 
 
-def _tool_config_from_payload(payload: dict[str, Any]) -> dict[str, bool]:
+def _tool_config_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raw = payload.get("gateway_tools")
     if not isinstance(raw, dict):
-        return {"enabled": False, "time": False, "web_search": False}
+        return {"enabled": False, "time": False, "web_search": False, "client_timezone": None}
     enabled = bool(raw.get("enabled"))
+    client_timezone = raw.get("client_timezone")
     return {
         "enabled": enabled,
         "time": enabled and bool(raw.get("time")),
         "web_search": enabled and bool(raw.get("web_search")),
+        "client_timezone": client_timezone if isinstance(client_timezone, str) and client_timezone.strip() else None,
     }
 
 
@@ -578,6 +580,7 @@ async def _perform_web_read(url: str) -> dict[str, str]:
 async def _time_tool_result(arguments: dict[str, Any]) -> dict[str, str]:
     timezone_name = arguments.get("timezone")
     location = arguments.get("location")
+    client_timezone = arguments.get("client_timezone")
     now_utc = dt.datetime.now(dt.timezone.utc)
     result = {"utc": now_utc.isoformat()}
     if isinstance(timezone_name, str) and timezone_name.strip():
@@ -585,11 +588,20 @@ async def _time_tool_result(arguments: dict[str, Any]) -> dict[str, str]:
         result["timezone"] = timezone_name.strip()
         result["local"] = now_utc.astimezone(tz).isoformat()
     elif isinstance(location, str) and location.strip():
-        resolved = await _resolve_location_timezone(location.strip())
-        tz = ZoneInfo(resolved["timezone"])
-        result["timezone"] = resolved["timezone"]
-        result["resolved_location"] = resolved["resolved_location"]
-        result["local"] = now_utc.astimezone(tz).isoformat()
+        try:
+            resolved = await _resolve_location_timezone(location.strip())
+            tz = ZoneInfo(resolved["timezone"])
+            result["timezone"] = resolved["timezone"]
+            result["resolved_location"] = resolved["resolved_location"]
+            result["local"] = now_utc.astimezone(tz).isoformat()
+        except ValueError:
+            if isinstance(client_timezone, str) and client_timezone.strip():
+                tz = ZoneInfo(client_timezone.strip())
+                result["timezone"] = client_timezone.strip()
+                result["local"] = now_utc.astimezone(tz).isoformat()
+                result["resolved_location"] = location.strip()
+            else:
+                raise
     else:
         local_now = dt.datetime.now().astimezone()
         result["timezone"] = str(local_now.tzinfo) if local_now.tzinfo else "local"
@@ -738,8 +750,18 @@ async def _maybe_handle_direct_time_request(
         return None
     location = _extract_location_hint(user_text)
     if "my timezone" in lowered and not location:
-        return None
-    tool_result = await _time_tool_result({"location": location} if location else {})
+        if not config.get("client_timezone"):
+            return None
+        tool_result = await _time_tool_result({"timezone": config["client_timezone"]})
+    else:
+        tool_args: dict[str, Any] = {}
+        if location:
+            tool_args["location"] = location
+            if config.get("client_timezone"):
+                tool_args["client_timezone"] = config["client_timezone"]
+        elif config.get("client_timezone") and ("my timezone" in lowered):
+            tool_args["timezone"] = config["client_timezone"]
+        tool_result = await _time_tool_result(tool_args)
     return _chat_response_from_text(
         _format_time_answer(tool_result, user_text),
         model=str(payload.get("model", "local")),

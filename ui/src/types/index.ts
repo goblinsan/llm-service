@@ -64,6 +64,7 @@ export interface GatewayToolsConfig {
   enabled: boolean;
   time: boolean;
   web_search: boolean;
+  client_timezone?: string;
 }
 
 export interface TokenUsage {
