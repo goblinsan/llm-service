@@ -21,7 +21,7 @@ RUN apt-get update && \
 
 WORKDIR /src/llama.cpp
 
-RUN curl -fsSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/${LLAMA_CPP_REF}" \
+RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/${LLAMA_CPP_REF}.tar.gz" \
       | tar -xz --strip-components=1 && \
     cmake -S . -B build \
       -DGGML_CUDA=ON \
