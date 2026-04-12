@@ -421,6 +421,11 @@ class TestBuiltinTools:
         assert "web_search" not in prompt
         assert '<tool_call>{"name":"TOOL_NAME","arguments":{...}}</tool_call>' in prompt
 
+    def test_tool_prompt_lists_web_read_when_search_enabled(self):
+        prompt = m._tool_system_message({"enabled": True, "time": False, "web_search": True})
+        assert "web_search" in prompt
+        assert "web_read" in prompt
+
     def test_parse_tool_call_rejects_disabled_tool(self):
         parsed = m._parse_tool_call(
             '<tool_call>{"name":"web_search","arguments":{"query":"today"}}</tool_call>',
@@ -429,13 +434,33 @@ class TestBuiltinTools:
         assert parsed is not None
         assert parsed["error"]
 
+    def test_parse_tool_call_allows_web_read_when_search_enabled(self):
+        parsed = m._parse_tool_call(
+            '<tool_call>{"name":"web_read","arguments":{"url":"https://example.com"}}</tool_call>',
+            {"enabled": True, "time": False, "web_search": True},
+        )
+        assert parsed == {
+            "name": "web_read",
+            "arguments": {"url": "https://example.com"},
+        }
+
     def test_time_tool_returns_date_and_time(self):
-        result = m._time_tool_result({})
+        result = asyncio.run(m._time_tool_result({}))
         assert "date" in result
         assert "time" in result
         assert "local" in result
 
-    def test_tool_loop_executes_search_and_returns_final_answer(self):
+    def test_time_tool_resolves_location(self):
+        with patch(
+            "main._resolve_location_timezone",
+            new=AsyncMock(return_value={"timezone": "America/New_York", "resolved_location": "Clearwater, Florida, United States"}),
+        ):
+            result = asyncio.run(m._time_tool_result({"location": "clearwater, fl"}))
+
+        assert result["timezone"] == "America/New_York"
+        assert result["resolved_location"] == "Clearwater, Florida, United States"
+
+    def test_tool_loop_executes_search_then_read_then_returns_final_answer(self):
         first = {
             "id": "chatcmpl-1",
             "model": "local",
@@ -452,6 +477,21 @@ class TestBuiltinTools:
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
         second = {
+            "id": "chatcmpl-1b",
+            "model": "local",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": '<tool_call>{"name":"web_read","arguments":{"url":"https://example.com"}}</tool_call>',
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+        }
+        third = {
             "id": "chatcmpl-2",
             "model": "local",
             "choices": [
@@ -464,16 +504,25 @@ class TestBuiltinTools:
             "usage": {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26},
         }
 
+        call_count = {"value": 0}
+
         async def fake_call(payload):
-            if payload["messages"][-1]["role"] == "system" and "TOOL RESULT" in payload["messages"][-1]["content"]:
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                return 200, {}, first
+            if call_count["value"] == 2:
                 return 200, {}, second
-            return 200, {}, first
+            return 200, {}, third
 
         with (
             patch("main._call_llama_chat", new=AsyncMock(side_effect=fake_call)),
             patch(
                 "main._perform_web_search",
                 new=AsyncMock(return_value={"query": "today weather", "results": [{"title": "Example", "url": "https://example.com", "snippet": "stub"}]}),
+            ),
+            patch(
+                "main._perform_web_read",
+                new=AsyncMock(return_value={"url": "https://example.com", "title": "Example", "content": "Today weather is clear."}),
             ),
         ):
             resp = asyncio.run(
@@ -490,7 +539,7 @@ class TestBuiltinTools:
         assert resp.status_code == 200
         body = json.loads(resp.body.decode())
         assert body["choices"][0]["message"]["content"] == "Here is the answer."
-        assert body["usage"]["prompt_tokens"] == 30
+        assert body["usage"]["prompt_tokens"] == 42
 
 
 # ---------------------------------------------------------------------------

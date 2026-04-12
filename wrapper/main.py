@@ -212,7 +212,10 @@ Available tools:
 Rules:
 - Emit only one tool call at a time.
 - Do not answer normally in the same message as a tool call.
-- After you receive a system message beginning with TOOL RESULT, use that result to answer the user directly.
+- After you receive a system message beginning with TOOL RESULT, either answer directly or emit one more tool call if you still need more information.
+- Prefer `time_now` for date/time questions.
+- If a user gives a location like a city or state, pass it as `{"location":"..."}` to `time_now`.
+- For web questions, use `web_search` first. If the search snippets are insufficient, use `web_read` on the most relevant result before answering.
 - Do not invent tool results.
 """
 
@@ -315,9 +318,10 @@ def _tool_config_from_payload(payload: dict[str, Any]) -> dict[str, bool]:
 def _tool_system_message(config: dict[str, bool]) -> str:
     tool_defs: list[str] = []
     if config.get("time"):
-        tool_defs.append('- `time_now`: get the current date and time. Optional arguments: {"timezone":"Area/City"}')
+        tool_defs.append('- `time_now`: get the current date and time. Optional arguments: {"timezone":"Area/City"} or {"location":"city, state/country"}')
     if config.get("web_search"):
         tool_defs.append('- `web_search`: search the public web. Required arguments: {"query":"search terms"}')
+        tool_defs.append('- `web_read`: fetch and read a web page. Required arguments: {"url":"https://..."}')
     return _TOOL_PROMPT_TEMPLATE.format(
         tool_definitions="\n".join(tool_defs) if tool_defs else "- none",
     )
@@ -364,6 +368,7 @@ def _parse_tool_call(text: str, config: dict[str, bool]) -> Optional[dict[str, A
         allowed.add("time_now")
     if config.get("web_search"):
         allowed.add("web_search")
+        allowed.add("web_read")
     if name not in allowed:
         return {"name": name, "arguments": arguments, "error": f"Tool '{name}' is not enabled"}
     return {"name": name, "arguments": arguments}
@@ -413,13 +418,67 @@ async def _perform_web_search(query: str, max_results: int = 5) -> dict[str, Any
     return {"query": query, "results": results}
 
 
-def _time_tool_result(arguments: dict[str, Any]) -> dict[str, str]:
+async def _resolve_location_timezone(location: str) -> dict[str, str]:
+    params = {"name": location, "count": 1, "language": "en", "format": "json"}
+    headers = {"User-Agent": "Mozilla/5.0 (llm-service geocoding)"}
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get("https://geocoding-api.open-meteo.com/v1/search", params=params, headers=headers)
+        response.raise_for_status()
+    payload = response.json()
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError(f"Could not resolve location '{location}'")
+    first = results[0]
+    timezone = first.get("timezone")
+    if not isinstance(timezone, str) or not timezone:
+        raise ValueError(f"No timezone found for '{location}'")
+    parts = [first.get("name"), first.get("admin1"), first.get("country")]
+    label = ", ".join([part for part in parts if isinstance(part, str) and part])
+    return {"timezone": timezone, "resolved_location": label or location}
+
+
+async def _perform_web_read(url: str) -> dict[str, str]:
+    headers = {"User-Agent": "Mozilla/5.0 (llm-service web read)"}
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    text = response.text
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    title = _strip_html(title_match.group(1)) if title_match else url
+    cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", text)
+    cleaned = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", cleaned)
+    cleaned = _strip_html(cleaned)
+    if len(cleaned) > 4000:
+        cleaned = cleaned[:4000].rsplit(" ", 1)[0] + "..."
+    return {
+        "url": url,
+        "content_type": content_type,
+        "title": title,
+        "content": cleaned,
+    }
+
+
+async def _time_tool_result(arguments: dict[str, Any]) -> dict[str, str]:
     timezone_name = arguments.get("timezone")
+    location = arguments.get("location")
     now_utc = dt.datetime.now(dt.timezone.utc)
     result = {"utc": now_utc.isoformat()}
     if isinstance(timezone_name, str) and timezone_name.strip():
         tz = ZoneInfo(timezone_name.strip())
         result["timezone"] = timezone_name.strip()
+        result["local"] = now_utc.astimezone(tz).isoformat()
+    elif isinstance(location, str) and location.strip():
+        resolved = await _resolve_location_timezone(location.strip())
+        tz = ZoneInfo(resolved["timezone"])
+        result["timezone"] = resolved["timezone"]
+        result["resolved_location"] = resolved["resolved_location"]
         result["local"] = now_utc.astimezone(tz).isoformat()
     else:
         local_now = dt.datetime.now().astimezone()
@@ -437,12 +496,17 @@ async def _execute_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     arguments = tool_call.get("arguments", {})
     try:
         if name == "time_now":
-            return {"ok": True, "name": name, "result": _time_tool_result(arguments)}
+            return {"ok": True, "name": name, "result": await _time_tool_result(arguments)}
         if name == "web_search":
             query = arguments.get("query")
             if not isinstance(query, str) or not query.strip():
                 return {"ok": False, "name": name, "error": "web_search requires a non-empty 'query' string"}
             return {"ok": True, "name": name, "result": await _perform_web_search(query.strip())}
+        if name == "web_read":
+            url = arguments.get("url")
+            if not isinstance(url, str) or not url.strip():
+                return {"ok": False, "name": name, "error": "web_read requires a non-empty 'url' string"}
+            return {"ok": True, "name": name, "result": await _perform_web_read(url.strip())}
         return {"ok": False, "name": name, "error": f"Unsupported tool '{name}'"}
     except Exception as exc:
         log.warning("Tool execution failed for %s: %s", name, exc)
@@ -521,7 +585,7 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
     total_usage: dict[str, int] = {}
     last_response: dict[str, Any] | None = None
 
-    for _ in range(3):
+    for _ in range(5):
         llama_payload = {**stripped_payload, "messages": conversation}
         status_code, _, chat_response = await _call_llama_chat(llama_payload)
         if status_code != 200:
