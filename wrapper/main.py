@@ -204,7 +204,7 @@ _DDG_SNIPPET_RE = re.compile(
 _TOOL_PROMPT_TEMPLATE = """Built-in tools are available for this conversation.
 
 When you need external information, respond with ONLY one XML block in exactly this format:
-<tool_call>{"name":"TOOL_NAME","arguments":{...}}</tool_call>
+<tool_call>{{"name":"TOOL_NAME","arguments":{{...}}}}</tool_call>
 
 Available tools:
 {tool_definitions}

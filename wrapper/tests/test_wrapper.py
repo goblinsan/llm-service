@@ -419,6 +419,7 @@ class TestBuiltinTools:
         prompt = m._tool_system_message({"enabled": True, "time": True, "web_search": False})
         assert "time_now" in prompt
         assert "web_search" not in prompt
+        assert '<tool_call>{"name":"TOOL_NAME","arguments":{...}}</tool_call>' in prompt
 
     def test_parse_tool_call_rejects_disabled_tool(self):
         parsed = m._parse_tool_call(
