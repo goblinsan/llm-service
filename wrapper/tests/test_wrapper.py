@@ -444,6 +444,10 @@ class TestBuiltinTools:
         assert "web_search" in prompt
         assert "web_read" in prompt
 
+    def test_tool_prompt_includes_literal_location_json_example(self):
+        prompt = m._tool_system_message({"enabled": True, "time": True, "web_search": False})
+        assert '{"location":"..."}' in prompt
+
     def test_parse_tool_call_rejects_disabled_tool(self):
         parsed = m._parse_tool_call(
             '<tool_call>{"name":"web_search","arguments":{"query":"today"}}</tool_call>',

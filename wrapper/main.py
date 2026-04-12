@@ -214,7 +214,7 @@ Rules:
 - Do not answer normally in the same message as a tool call.
 - After you receive a system message beginning with TOOL RESULT, either answer directly or emit one more tool call if you still need more information.
 - Prefer `time_now` for date/time questions.
-- If a user gives a location like a city or state, pass it as `{"location":"..."}` to `time_now`.
+- If a user gives a location like a city or state, pass it as `{{"location":"..."}}` to `time_now`.
 - For web questions, use `web_search` first. If the search snippets are insufficient, use `web_read` on the most relevant result before answering.
 - Do not invent tool results.
 """
