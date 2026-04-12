@@ -19,7 +19,7 @@ export function PromptForm({
   healthStatus,
   activeModelName,
 }: PromptFormProps) {
-  const [systemPrompt, setSystemPrompt] = useState("You are a helpful assistant.");
+  const [systemPrompt, setSystemPrompt] = useState("Provide concise answers without explanations");
   const [userMessage, setUserMessage] = useState("");
   const [model, setModel] = useState("local");
   const [temperature, setTemperature] = useState(0.7);

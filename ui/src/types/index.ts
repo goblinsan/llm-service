@@ -119,7 +119,7 @@ export const DEFAULT_PRESETS: PromptPreset[] = [
   {
     id: "general",
     name: "General assistant",
-    systemPrompt: "You are a helpful assistant.",
+    systemPrompt: "Provide concise answers without explanations",
     userPrompt: "",
     params: { temperature: 0.7, max_tokens: 512 },
   },
