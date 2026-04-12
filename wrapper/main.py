@@ -57,8 +57,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.parse
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -86,7 +88,7 @@ LLAMA_PORT: int = int(os.getenv("LLAMA_PORT", "8081"))
 INITIAL_N_GPU_LAYERS: int = int(os.getenv("N_GPU_LAYERS", "-1"))
 INITIAL_CTX_SIZE: int = int(os.getenv("CTX_SIZE", "4096"))
 INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
-LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "120"))
+LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "300"))
 DOWNLOAD_READ_TIMEOUT: float = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "300"))
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "2048"))
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
@@ -142,6 +144,7 @@ _state: dict = {
 }
 
 _downloads: dict[str, dict] = {}  # task_id → progress dict
+_llama_log_tail: deque[str] = deque(maxlen=200)
 
 # Counter of in-flight inference requests.  Because asyncio is single-threaded,
 # incrementing/decrementing this integer is safe without a lock (there is no
@@ -203,6 +206,38 @@ def _require_admin(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing admin token")
 
 
+def _record_llama_output(proc: subprocess.Popen) -> None:
+    stream = proc.stdout
+    if stream is None:
+        return
+    try:
+        for raw_line in stream:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            _llama_log_tail.append(line)
+            log.info("[llama] %s", line)
+    except Exception as exc:
+        log.warning("Failed to read llama-server output: %s", exc)
+
+
+def _describe_llama_failure(timeout: Optional[int] = None) -> str:
+    proc: Optional[subprocess.Popen] = _state.get("process")
+    if proc is not None:
+        code = proc.poll()
+        if code is not None:
+            if _llama_log_tail:
+                return f"llama-server exited early with code {code}: {_llama_log_tail[-1]}"
+            return f"llama-server exited early with code {code}"
+    if timeout is not None:
+        if _llama_log_tail:
+            return f"llama-server did not become healthy within {timeout}s: {_llama_log_tail[-1]}"
+        return f"llama-server did not become healthy within {timeout}s"
+    if _llama_log_tail:
+        return _llama_log_tail[-1]
+    return "llama-server failed to start"
+
+
 def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subprocess.Popen:
     if _LLAMA_BIN is None:
         raise RuntimeError(
@@ -222,7 +257,16 @@ def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subproces
         "--port", str(LLAMA_PORT),
     ]
     log.info("Starting llama-server: %s", " ".join(cmd))
-    return subprocess.Popen(cmd)
+    _llama_log_tail.clear()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    threading.Thread(target=_record_llama_output, args=(proc,), daemon=True).start()
+    return proc
 
 
 def _stop_llama() -> None:
@@ -239,23 +283,29 @@ def _stop_llama() -> None:
     _state["process"] = None
 
 
-async def _wait_for_llama(timeout: int = LLAMA_STARTUP_TIMEOUT) -> bool:
+async def _wait_for_llama(timeout: int = LLAMA_STARTUP_TIMEOUT) -> tuple[bool, Optional[str]]:
     """Poll llama-server /health until it returns HTTP 200 or *timeout* seconds elapse."""
     url = f"http://127.0.0.1:{LLAMA_PORT}/health"
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
     async with httpx.AsyncClient() as client:
         while loop.time() < deadline:
+            proc: Optional[subprocess.Popen] = _state.get("process")
+            if proc is not None and proc.poll() is not None:
+                detail = _describe_llama_failure()
+                log.error(detail)
+                return False, detail
             try:
                 r = await client.get(url, timeout=2.0)
                 if r.status_code == 200:
                     log.info("llama-server is healthy")
-                    return True
+                    return True, None
             except Exception:
                 pass
             await asyncio.sleep(1)
-    log.error("llama-server did not become healthy within %ds", timeout)
-    return False
+    detail = _describe_llama_failure(timeout)
+    log.error(detail)
+    return False, detail
 
 # ---------------------------------------------------------------------------
 # Startup / shutdown helpers (called by _lifespan)
@@ -292,13 +342,13 @@ async def _on_startup() -> None:
         _state["error"] = "Failed to start llama-server"
         return
 
-    ok = await _wait_for_llama()
+    ok, detail = await _wait_for_llama()
     if ok:
         _state["status"] = "ready"
         _state["error"] = None
     else:
         _state["status"] = "error"
-        _state["error"] = "llama-server did not become healthy during startup"
+        _state["error"] = detail or "llama-server did not become healthy during startup"
 
 
 def _on_shutdown() -> None:
@@ -564,10 +614,10 @@ async def load_model(
             "error": _state["error"],
         }
 
-    ok = await _wait_for_llama()
+    ok, detail = await _wait_for_llama()
     _state["status"] = "ready" if ok else "error"
     if not ok:
-        _state["error"] = "llama-server did not become healthy after model switch"
+        _state["error"] = detail or "llama-server did not become healthy after model switch"
 
     return {
         "loaded_model": _state["model"],
