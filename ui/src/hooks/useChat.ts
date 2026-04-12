@@ -63,7 +63,11 @@ export function useChat(): UseChatReturn {
             let msg = `HTTP ${res.status}`;
             try {
               const j = JSON.parse(text);
-              msg = j.error ?? j.detail ?? msg;
+              if (j.detail && j.error) {
+                msg = `${j.error}: ${j.detail}`;
+              } else {
+                msg = j.detail ?? j.error ?? msg;
+              }
             } catch {
               /* empty */
             }
