@@ -4,7 +4,7 @@ ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
 # CUDA images failed to initialize on the RTX 4060 node with driver 550 /
 # CUDA 12.4. Build llama.cpp from source against CUDA 12.4 instead so we keep
 # GPU compatibility and regain newer model-architecture support.
-ARG LLAMA_CPP_REF=3fc65063d9c356510b86fc2f15ca8aea711bfc47
+ARG LLAMA_CPP_REF=master
 
 FROM ${CUDA_DEVEL_IMAGE} AS llama-builder
 
@@ -22,7 +22,7 @@ RUN apt-get update && \
 
 WORKDIR /src/llama.cpp
 
-RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/${LLAMA_CPP_REF}.tar.gz" \
+RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/refs/heads/${LLAMA_CPP_REF}.tar.gz" \
       | tar -xz --strip-components=1 && \
     cmake -S . -B build \
       -DGGML_CUDA=ON \
