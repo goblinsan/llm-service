@@ -43,7 +43,7 @@ RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/li
     LLAMA_SERVER_BIN="$(find build -type f -name llama-server | head -n 1)" && \
     test -n "$LLAMA_SERVER_BIN" && \
     install -m 0755 "$LLAMA_SERVER_BIN" /tmp/llama-dist/llama-server && \
-    find build \( -type f -o -type l \) \( -name 'libllama.so*' -o -name 'libggml*.so*' \) -exec cp -P {} /tmp/llama-dist/ \;
+    find build \( -type f -o -type l \) -name 'lib*.so*' -exec cp -P {} /tmp/llama-dist/ \;
 
 FROM ${CUDA_RUNTIME_IMAGE}
 
