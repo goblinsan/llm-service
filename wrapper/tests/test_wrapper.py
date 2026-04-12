@@ -482,6 +482,46 @@ class TestBuiltinTools:
         assert result["timezone"] == "America/New_York"
         assert result["resolved_location"] == "Clearwater, Florida, United States"
 
+    def test_direct_time_handler_uses_location_hint(self):
+        with patch(
+            "main._time_tool_result",
+            new=AsyncMock(
+                return_value={
+                    "local": "2026-04-12T18:28:14-04:00",
+                    "timezone": "America/New_York",
+                    "resolved_location": "Clearwater, Florida, United States",
+                    "date": "2026-04-12",
+                    "time": "18:28:14",
+                }
+            ),
+        ) as mock_time:
+            response = asyncio.run(
+                m._maybe_handle_direct_time_request(
+                    {
+                        "model": "local",
+                        "messages": [{"role": "user", "content": "what is the time, im in clearwater, fl"}],
+                    },
+                    {"enabled": True, "time": True, "web_search": False},
+                )
+            )
+
+        assert response is not None
+        mock_time.assert_awaited_once_with({"location": "clearwater, fl"})
+        assert "6:28:14 PM America/New_York" in response["choices"][0]["message"]["content"]
+
+    def test_direct_time_handler_skips_ambiguous_my_timezone_request(self):
+        response = asyncio.run(
+            m._maybe_handle_direct_time_request(
+                {
+                    "model": "local",
+                    "messages": [{"role": "user", "content": "what is the time in my timezone"}],
+                },
+                {"enabled": True, "time": True, "web_search": False},
+            )
+        )
+
+        assert response is None
+
     def test_tool_loop_executes_search_then_read_then_returns_final_answer(self):
         first = {
             "id": "chatcmpl-1",

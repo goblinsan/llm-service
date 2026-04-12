@@ -192,6 +192,8 @@ _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\/(\d+)\s+layers\s+to\s+GPU", re.IGN
 _FLASH_ATTN_RE = re.compile(r"flash_attn\s*=\s*(\d+)", re.IGNORECASE)
 _CUDA_DEVICE_RE = re.compile(r"using device\s+([A-Z0-9_]+)\s+\((.+?)\)\s+-\s+(\d+)\s+MiB free", re.IGNORECASE)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.IGNORECASE | re.DOTALL)
+_TIME_INTENT_RE = re.compile(r"\b(time|date|today|day|timezone|clock)\b", re.IGNORECASE)
+_TIME_LOCATION_RE = re.compile(r"\b(?:i am|i'm|im)\s+in\s+([a-z0-9 ,.\-]+)$", re.IGNORECASE)
 _DDG_RESULT_RE = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
     re.IGNORECASE | re.DOTALL,
@@ -338,6 +340,22 @@ def _extract_text_content(chat_response: dict[str, Any]) -> str:
         return content if isinstance(content, str) else ""
     text = first.get("text")
     return text if isinstance(text, str) else ""
+
+
+def _latest_user_text(messages: list[Any]) -> Optional[str]:
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content.strip()
+    return None
+
+
+def _extract_location_hint(user_text: str) -> Optional[str]:
+    match = _TIME_LOCATION_RE.search(user_text.strip())
+    if match:
+        return match.group(1).strip(" .")
+    return None
 
 
 def _merge_usage(total: dict[str, int], usage: Any) -> None:
@@ -570,6 +588,72 @@ def _sse_response_from_chat_json(chat_response: dict[str, Any]) -> StreamingResp
     return StreamingResponse(_emit(), media_type="text/event-stream")
 
 
+def _chat_response_from_text(
+    content: str,
+    *,
+    model: str = "local",
+    usage: Optional[dict[str, int]] = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(dt.datetime.now().timestamp()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    if usage:
+        response["usage"] = usage
+    return response
+
+
+def _format_time_answer(result: dict[str, str], user_text: str) -> str:
+    local_raw = result.get("local")
+    if not local_raw:
+        return result.get("utc", "")
+    local_dt = dt.datetime.fromisoformat(local_raw)
+    wants_date = bool(re.search(r"\b(date|today|day)\b", user_text, re.IGNORECASE))
+    wants_time = bool(re.search(r"\btime|clock|timezone\b", user_text, re.IGNORECASE))
+    time_part = local_dt.strftime("%-I:%M:%S %p")
+    tz_name = result.get("timezone") or (local_dt.tzname() or "")
+    date_part = local_dt.strftime("%B %-d, %Y")
+    if wants_time and wants_date:
+        return f"{time_part} {tz_name} on {date_part}".strip()
+    if wants_date and not wants_time:
+        return date_part
+    return f"{time_part} {tz_name}".strip()
+
+
+async def _maybe_handle_direct_time_request(
+    payload: dict[str, Any],
+    config: dict[str, bool],
+) -> Optional[dict[str, Any]]:
+    if not config.get("time"):
+        return None
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+    user_text = _latest_user_text(messages)
+    if not user_text or not _TIME_INTENT_RE.search(user_text):
+        return None
+    lowered = user_text.lower()
+    if "holiday" in lowered or "search" in lowered or "headline" in lowered or "news" in lowered:
+        return None
+    location = _extract_location_hint(user_text)
+    if "my timezone" in lowered and not location:
+        return None
+    tool_result = await _time_tool_result({"location": location} if location else {})
+    return _chat_response_from_text(
+        _format_time_answer(tool_result, user_text),
+        model=str(payload.get("model", "local")),
+    )
+
+
 async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
     stream_requested = bool(payload.get("stream"))
     config = _tool_config_from_payload(payload)
@@ -579,6 +663,10 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
     base_messages = payload.get("messages")
     if not isinstance(base_messages, list):
         return JSONResponse({"error": "messages must be an array"}, status_code=400)
+
+    direct_time_response = await _maybe_handle_direct_time_request(payload, config)
+    if direct_time_response is not None:
+        return _sse_response_from_chat_json(direct_time_response) if stream_requested else JSONResponse(direct_time_response)
 
     tool_prompt = {"role": "system", "content": _tool_system_message(config)}
     conversation = [tool_prompt, *base_messages]
