@@ -1,9 +1,10 @@
-import type { HealthResponse, ModelsResponse } from "../types";
+import type { HealthResponse, ModelsResponse, TurnMetadata } from "../types";
 
 interface StatusPanelProps {
   health: HealthResponse | null;
   healthError: string | null;
   models: ModelsResponse | null;
+  latestTurnMetadata?: TurnMetadata | null;
 }
 
 const statusColour: Record<string, string> = {
@@ -29,7 +30,7 @@ function Dot({ colour }: { colour: string }) {
   );
 }
 
-export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
+export function StatusPanel({ health, healthError, models, latestTurnMetadata }: StatusPanelProps) {
   const status = health?.status ?? "loading";
   const colour = statusColour[status] ?? "#94a3b8";
   const loadedModel = models?.loaded_model
@@ -52,6 +53,14 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
     Array.isArray(llama?.recent_log_tail) && llama.recent_log_tail.length > 0
       ? llama.recent_log_tail[llama.recent_log_tail.length - 1]
       : null;
+  const lastTokensPerSecond =
+    typeof latestTurnMetadata?.tokens_per_second === "number"
+      ? `${latestTurnMetadata.tokens_per_second.toFixed(1)} t/s`
+      : "—";
+  const lastLatency =
+    typeof latestTurnMetadata?.latency_ms === "number"
+      ? `${latestTurnMetadata.latency_ms >= 1000 ? (latestTurnMetadata.latency_ms / 1000).toFixed(2) + " s" : `${latestTurnMetadata.latency_ms} ms`}`
+      : "—";
 
   return (
     <section className="panel status-panel">
@@ -99,6 +108,14 @@ export function StatusPanel({ health, healthError, models }: StatusPanelProps) {
           <tr>
             <th>Load GPU</th>
             <td>{loadGpu}</td>
+          </tr>
+          <tr>
+            <th>Last speed</th>
+            <td>{lastTokensPerSecond}</td>
+          </tr>
+          <tr>
+            <th>Last latency</th>
+            <td>{lastLatency}</td>
           </tr>
           {lastLlamaLine ? (
             <tr>

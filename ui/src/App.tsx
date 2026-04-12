@@ -189,6 +189,11 @@ export default function App() {
     refreshModels();
   }
 
+  const latestTurnMetadata =
+    activeSession?.turns.length
+      ? activeSession.turns[activeSession.turns.length - 1]?.metadata ?? null
+      : null;
+
   const activeModelName = models?.loaded_model
     ? models.loaded_model.split("/").pop() || models.loaded_model
     : "";
@@ -222,6 +227,7 @@ export default function App() {
             health={health}
             healthError={healthError}
             models={models}
+            latestTurnMetadata={latestTurnMetadata}
           />
           <ModelInventory
             models={models?.models ?? []}
