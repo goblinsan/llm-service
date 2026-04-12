@@ -46,6 +46,7 @@ export function useChat(): UseChatReturn {
         temperature: params.temperature,
         max_tokens: params.max_tokens,
         stream: params.stream,
+        gateway_tools: params.gateway_tools,
       });
 
       (async () => {

@@ -5,6 +5,8 @@ is imported) so that SKIP_LLAMA_STARTUP=1 prevents the startup event from
 launching a real llama-server binary.
 """
 
+import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -91,13 +93,19 @@ class TestHealth:
         m._state["status"] = "ready"
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "ctx_size": 4096, "n_gpu_layers": -1}
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["ctx_size"] == 4096
+        assert body["n_gpu_layers"] == -1
 
     def test_loading(self, client):
         m._state["status"] = "loading"
         resp = client.get("/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "loading", "ctx_size": 4096, "n_gpu_layers": -1}
+        body = resp.json()
+        assert body["status"] == "loading"
+        assert body["ctx_size"] == 4096
+        assert body["n_gpu_layers"] == -1
 
     def test_error(self, client):
         m._state["status"] = "error"
@@ -387,6 +395,101 @@ class TestProxy:
         m._state["status"] = "error"
         resp = client.post("/v1/chat/completions", json={})
         assert resp.status_code == 503
+
+    def test_routes_tool_enabled_chat_through_tool_shim(self, client):
+        with patch(
+            "main._handle_builtin_tool_chat",
+            new=AsyncMock(return_value=m.JSONResponse({"ok": True})),
+        ) as mock_handler:
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "what time is it?"}],
+                    "gateway_tools": {"enabled": True, "time": True, "web_search": False},
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        mock_handler.assert_awaited_once()
+
+
+class TestBuiltinTools:
+    def test_tool_prompt_only_lists_enabled_tools(self):
+        prompt = m._tool_system_message({"enabled": True, "time": True, "web_search": False})
+        assert "time_now" in prompt
+        assert "web_search" not in prompt
+
+    def test_parse_tool_call_rejects_disabled_tool(self):
+        parsed = m._parse_tool_call(
+            '<tool_call>{"name":"web_search","arguments":{"query":"today"}}</tool_call>',
+            {"enabled": True, "time": True, "web_search": False},
+        )
+        assert parsed is not None
+        assert parsed["error"]
+
+    def test_time_tool_returns_date_and_time(self):
+        result = m._time_tool_result({})
+        assert "date" in result
+        assert "time" in result
+        assert "local" in result
+
+    def test_tool_loop_executes_search_and_returns_final_answer(self):
+        first = {
+            "id": "chatcmpl-1",
+            "model": "local",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": '<tool_call>{"name":"web_search","arguments":{"query":"today weather"}}</tool_call>',
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        second = {
+            "id": "chatcmpl-2",
+            "model": "local",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Here is the answer."},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26},
+        }
+
+        async def fake_call(payload):
+            if payload["messages"][-1]["role"] == "system" and "TOOL RESULT" in payload["messages"][-1]["content"]:
+                return 200, {}, second
+            return 200, {}, first
+
+        with (
+            patch("main._call_llama_chat", new=AsyncMock(side_effect=fake_call)),
+            patch(
+                "main._perform_web_search",
+                new=AsyncMock(return_value={"query": "today weather", "results": [{"title": "Example", "url": "https://example.com", "snippet": "stub"}]}),
+            ),
+        ):
+            resp = asyncio.run(
+                m._handle_builtin_tool_chat(
+                    {
+                        "model": "local",
+                        "messages": [{"role": "user", "content": "search the web"}],
+                        "stream": False,
+                        "gateway_tools": {"enabled": True, "time": False, "web_search": True},
+                    }
+                )
+            )
+
+        assert resp.status_code == 200
+        body = json.loads(resp.body.decode())
+        assert body["choices"][0]["message"]["content"] == "Here is the answer."
+        assert body["usage"]["prompt_tokens"] == 30
 
 
 # ---------------------------------------------------------------------------

@@ -408,7 +408,7 @@ llama-server natively exposes `/v1/chat/completions` and `/v1/completions` in Op
 | `stop` sequences | ✅ Compatible | Accepts the same string array as OpenAI |
 | Streaming SSE (`"stream": true`) | ✅ Compatible | Returns `data: {...}` lines in OpenAI delta format, terminated with `data: [DONE]` |
 | `model` field in responses | ⚠️ Cosmetic difference | llama-server echoes back the model filename (e.g. `mistral-7b-v0.3.Q4_K_M.gguf`) rather than a short alias. The chat-platform adapter ignores this field for routing, so no shim is required. |
-| `tool_calls` / function calling | ⚠️ Not supported | llama-server does not implement the OpenAI `tools` / `tool_calls` response schema. If the chat-platform relies on structured function-calling, a thin proxy shim must be inserted (see note below). |
+| `tool_calls` / function calling | ⚠️ Not supported | llama-server still does not implement the OpenAI `tools` / `tool_calls` response schema. `llm-service` now includes an optional wrapper-side `gateway_tools` shim for local operator use, but it is not a drop-in replacement for OpenAI tool calling. |
 | `/v1/models` | ✅ Available | Returns a single-entry list for the loaded model; the chat-platform adapter uses this for model discovery (see [Chat-platform provider](#chat-platform-provider) section). |
 
 ### Streaming example
@@ -434,6 +434,34 @@ If the downstream chat-platform requires `tool_calls` in responses (i.e. structu
 2. Re-format the result as an OpenAI-compatible `tool_calls` array before returning it to the caller.
 
 This shim is only needed when function-calling is required; for plain chat and text completion the native llama-server API is fully compatible.
+
+### Built-in local tools (`gateway_tools`)
+
+For local operator use, `llm-service` can optionally run a lightweight wrapper-side tool loop for:
+
+1. `time_now`
+2. `web_search`
+
+Enable it by including a custom `gateway_tools` object in the chat-completions request body:
+
+```json
+{
+  "model": "local",
+  "messages": [{"role": "user", "content": "What day is it, and what are today's top Apple headlines?"}],
+  "stream": true,
+  "gateway_tools": {
+    "enabled": true,
+    "time": true,
+    "web_search": true
+  }
+}
+```
+
+Notes:
+
+* This is a wrapper-specific extension, not standard OpenAI `tool_calls`.
+* The wrapper prompts the model to emit a deterministic `<tool_call>{...}</tool_call>` block, executes the tool, then asks the model for a final answer.
+* Streaming remains available, but tool-enabled requests are resolved server-side before the final answer is streamed back.
 
 ---
 
@@ -554,7 +582,7 @@ This section documents the provider capabilities and model-naming conventions re
 | Text completion (`/v1/completions`) | ✅ Yes | OpenAI-compatible |
 | Embeddings (`/v1/embeddings`) | ✅ Yes | Passed through to llama-server |
 | Streaming SSE (`"stream": true`) | ✅ Yes | Standard OpenAI delta format |
-| `tool_calls` / function calling | ⚠️ Not supported | No native function-calling schema; a shim is required for agents that depend on `tool_calls` |
+| `tool_calls` / function calling | ⚠️ Not supported | No native OpenAI tool-calling schema. Wrapper-specific `gateway_tools` is available for local date/time and web search, but agents that require standard `tool_calls` should still use a proper shim or cloud provider. |
 | Vision / multimodal | ❌ No | Text-only models (GGUF); no image input support |
 | Fine-grained rate limits per agent | ❌ No | Global `MAX_CONCURRENT_REQUESTS` limit applies to all callers equally |
 

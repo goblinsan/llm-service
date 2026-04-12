@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
+import html
 import json
 import logging
 import os
@@ -62,7 +64,8 @@ import urllib.parse
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -188,6 +191,30 @@ _QUANT_RE = re.compile(r"\b(Q\d+[_A-Z0-9]*)\b", re.IGNORECASE)
 _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\/(\d+)\s+layers\s+to\s+GPU", re.IGNORECASE)
 _FLASH_ATTN_RE = re.compile(r"flash_attn\s*=\s*(\d+)", re.IGNORECASE)
 _CUDA_DEVICE_RE = re.compile(r"using device\s+([A-Z0-9_]+)\s+\((.+?)\)\s+-\s+(\d+)\s+MiB free", re.IGNORECASE)
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.IGNORECASE | re.DOTALL)
+_DDG_RESULT_RE = re.compile(
+    r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+    re.IGNORECASE | re.DOTALL,
+)
+_DDG_SNIPPET_RE = re.compile(
+    r'<a[^>]+class="result__snippet"[^>]*>(?P<snippet>.*?)</a>|<div[^>]+class="result__snippet"[^>]*>(?P<snippet_div>.*?)</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+_TOOL_PROMPT_TEMPLATE = """Built-in tools are available for this conversation.
+
+When you need external information, respond with ONLY one XML block in exactly this format:
+<tool_call>{"name":"TOOL_NAME","arguments":{...}}</tool_call>
+
+Available tools:
+{tool_definitions}
+
+Rules:
+- Emit only one tool call at a time.
+- Do not answer normally in the same message as a tool call.
+- After you receive a system message beginning with TOOL RESULT, use that result to answer the user directly.
+- Do not invent tool results.
+"""
 
 
 def _parse_quant(filename: str) -> Optional[str]:
@@ -271,6 +298,277 @@ def _get_llama_diagnostics() -> dict:
             diagnostics["cuda_free_mib_at_load"] = int(cuda_device_match.group(3))
 
     return diagnostics
+
+
+def _tool_config_from_payload(payload: dict[str, Any]) -> dict[str, bool]:
+    raw = payload.get("gateway_tools")
+    if not isinstance(raw, dict):
+        return {"enabled": False, "time": False, "web_search": False}
+    enabled = bool(raw.get("enabled"))
+    return {
+        "enabled": enabled,
+        "time": enabled and bool(raw.get("time")),
+        "web_search": enabled and bool(raw.get("web_search")),
+    }
+
+
+def _tool_system_message(config: dict[str, bool]) -> str:
+    tool_defs: list[str] = []
+    if config.get("time"):
+        tool_defs.append('- `time_now`: get the current date and time. Optional arguments: {"timezone":"Area/City"}')
+    if config.get("web_search"):
+        tool_defs.append('- `web_search`: search the public web. Required arguments: {"query":"search terms"}')
+    return _TOOL_PROMPT_TEMPLATE.format(
+        tool_definitions="\n".join(tool_defs) if tool_defs else "- none",
+    )
+
+
+def _extract_text_content(chat_response: dict[str, Any]) -> str:
+    choices = chat_response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
+    text = first.get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _merge_usage(total: dict[str, int], usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            total[key] = total.get(key, 0) + value
+
+
+def _parse_tool_call(text: str, config: dict[str, bool]) -> Optional[dict[str, Any]]:
+    match = _TOOL_CALL_RE.search(text)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    arguments = payload.get("arguments", {})
+    if not isinstance(name, str) or not isinstance(arguments, dict):
+        return None
+    allowed = set()
+    if config.get("time"):
+        allowed.add("time_now")
+    if config.get("web_search"):
+        allowed.add("web_search")
+    if name not in allowed:
+        return {"name": name, "arguments": arguments, "error": f"Tool '{name}' is not enabled"}
+    return {"name": name, "arguments": arguments}
+
+
+def _strip_html(text: str) -> str:
+    plain = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(re.sub(r"\s+", " ", plain)).strip()
+
+
+def _normalise_search_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        query = urllib.parse.parse_qs(parsed.query)
+        uddg = query.get("uddg")
+        if uddg:
+            return urllib.parse.unquote(uddg[0])
+    return html.unescape(url)
+
+
+async def _perform_web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+    params = {"q": query}
+    headers = {"User-Agent": "Mozilla/5.0 (llm-service web search)"}
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=10.0),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get("https://html.duckduckgo.com/html/", params=params, headers=headers)
+        response.raise_for_status()
+    html_text = response.text
+    title_matches = list(_DDG_RESULT_RE.finditer(html_text))
+    snippet_matches = list(_DDG_SNIPPET_RE.finditer(html_text))
+    results: list[dict[str, str]] = []
+    for idx, title_match in enumerate(title_matches[:max_results]):
+        snippet = ""
+        if idx < len(snippet_matches):
+            snippet = _strip_html(
+                snippet_matches[idx].group("snippet") or snippet_matches[idx].group("snippet_div") or ""
+            )
+        results.append(
+            {
+                "title": _strip_html(title_match.group("title")),
+                "url": _normalise_search_url(title_match.group("url")),
+                "snippet": snippet,
+            }
+        )
+    return {"query": query, "results": results}
+
+
+def _time_tool_result(arguments: dict[str, Any]) -> dict[str, str]:
+    timezone_name = arguments.get("timezone")
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    result = {"utc": now_utc.isoformat()}
+    if isinstance(timezone_name, str) and timezone_name.strip():
+        tz = ZoneInfo(timezone_name.strip())
+        result["timezone"] = timezone_name.strip()
+        result["local"] = now_utc.astimezone(tz).isoformat()
+    else:
+        local_now = dt.datetime.now().astimezone()
+        result["timezone"] = str(local_now.tzinfo) if local_now.tzinfo else "local"
+        result["local"] = local_now.isoformat()
+    result["date"] = result["local"][:10]
+    result["time"] = result["local"][11:19]
+    return result
+
+
+async def _execute_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
+    if tool_call.get("error"):
+        return {"ok": False, "error": tool_call["error"]}
+    name = tool_call["name"]
+    arguments = tool_call.get("arguments", {})
+    try:
+        if name == "time_now":
+            return {"ok": True, "name": name, "result": _time_tool_result(arguments)}
+        if name == "web_search":
+            query = arguments.get("query")
+            if not isinstance(query, str) or not query.strip():
+                return {"ok": False, "name": name, "error": "web_search requires a non-empty 'query' string"}
+            return {"ok": True, "name": name, "result": await _perform_web_search(query.strip())}
+        return {"ok": False, "name": name, "error": f"Unsupported tool '{name}'"}
+    except Exception as exc:
+        log.warning("Tool execution failed for %s: %s", name, exc)
+        return {"ok": False, "name": name, "error": f"{exc.__class__.__name__}: {exc}"}
+
+
+async def _call_llama_chat(payload: dict[str, Any]) -> tuple[int, dict[str, str], dict[str, Any]]:
+    target_url = f"http://127.0.0.1:{LLAMA_PORT}/v1/chat/completions"
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=30.0, read=REQUEST_TIMEOUT, write=30.0, pool=30.0)
+    ) as client:
+        response = await client.post(target_url, json=payload)
+    try:
+        data = response.json()
+    except ValueError:
+        data = {"error": response.text}
+    headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower() not in _HOP_BY_HOP
+    }
+    return response.status_code, headers, data
+
+
+def _sse_response_from_chat_json(chat_response: dict[str, Any]) -> StreamingResponse:
+    content = _extract_text_content(chat_response)
+    model = chat_response.get("model", "local")
+    response_id = chat_response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
+    created = int(chat_response.get("created") or dt.datetime.now().timestamp())
+    usage = chat_response.get("usage")
+
+    async def _emit():
+        first_chunk = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(first_chunk)}\n\n".encode()
+        if isinstance(usage, dict):
+            usage_chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": usage,
+            }
+            yield f"data: {json.dumps(usage_chunk)}\n\n".encode()
+        done_chunk = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        yield f"data: {json.dumps(done_chunk)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(_emit(), media_type="text/event-stream")
+
+
+async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
+    stream_requested = bool(payload.get("stream"))
+    config = _tool_config_from_payload(payload)
+    stripped_payload = {k: v for k, v in payload.items() if k != "gateway_tools"}
+    stripped_payload["stream"] = False
+
+    base_messages = payload.get("messages")
+    if not isinstance(base_messages, list):
+        return JSONResponse({"error": "messages must be an array"}, status_code=400)
+
+    tool_prompt = {"role": "system", "content": _tool_system_message(config)}
+    conversation = [tool_prompt, *base_messages]
+    total_usage: dict[str, int] = {}
+    last_response: dict[str, Any] | None = None
+
+    for _ in range(3):
+        llama_payload = {**stripped_payload, "messages": conversation}
+        status_code, _, chat_response = await _call_llama_chat(llama_payload)
+        if status_code != 200:
+            return JSONResponse(chat_response, status_code=status_code)
+        last_response = chat_response
+        _merge_usage(total_usage, chat_response.get("usage"))
+        content = _extract_text_content(chat_response)
+        tool_call = _parse_tool_call(content, config)
+        if not tool_call:
+            if total_usage:
+                chat_response["usage"] = total_usage
+            return _sse_response_from_chat_json(chat_response) if stream_requested else JSONResponse(chat_response)
+
+        tool_result = await _execute_tool_call(tool_call)
+        conversation.extend(
+            [
+                {"role": "assistant", "content": content},
+                {
+                    "role": "system",
+                    "content": (
+                        f"TOOL RESULT ({tool_call.get('name', 'unknown')}):\n"
+                        f"{json.dumps(tool_result, ensure_ascii=True)}\n"
+                        "Use this result to answer the user directly."
+                    ),
+                },
+            ]
+        )
+
+    fallback = last_response or {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(dt.datetime.now().timestamp()),
+        "model": stripped_payload.get("model", "local"),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "I hit the tool-call limit for this request. Please narrow the question and retry.",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    if total_usage:
+        fallback["usage"] = total_usage
+    return _sse_response_from_chat_json(fallback) if stream_requested else JSONResponse(fallback)
 
 
 def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subprocess.Popen:
@@ -809,6 +1107,7 @@ async def proxy(request: Request, path: str) -> Response:
         if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
     }
     body = await request.body()
+    payload: Optional[dict[str, Any]] = None
 
     # ------------------------------------------------------------------ #
     # Token-budget enforcement — silently clamp max_tokens to MAX_TOKENS  #
@@ -825,6 +1124,17 @@ async def proxy(request: Request, path: str) -> Response:
                 fwd_headers.setdefault("content-type", "application/json")
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass  # malformed body — let llama-server handle it
+
+    if (
+        path == "v1/chat/completions"
+        and isinstance(payload, dict)
+        and _tool_config_from_payload(payload).get("enabled")
+    ):
+        try:
+            return await _handle_builtin_tool_chat(payload)
+        finally:
+            if is_inference:
+                _active_inference -= 1
 
     # Use a finite read timeout only for GPU-bound inference requests.
     timeout = (

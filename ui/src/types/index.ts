@@ -60,6 +60,12 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface GatewayToolsConfig {
+  enabled: boolean;
+  time: boolean;
+  web_search: boolean;
+}
+
 export interface TokenUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -98,6 +104,7 @@ export interface ChatParams {
   temperature: number;
   max_tokens: number;
   stream: boolean;
+  gateway_tools?: GatewayToolsConfig;
 }
 
 export interface PromptPreset {

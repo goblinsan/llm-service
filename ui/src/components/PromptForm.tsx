@@ -25,6 +25,9 @@ export function PromptForm({
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(512);
   const [stream, setStream] = useState(true);
+  const [toolsEnabled, setToolsEnabled] = useState(false);
+  const [timeToolEnabled, setTimeToolEnabled] = useState(true);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [selectedPreset, setSelectedPreset] = useState<string>("");
 
   const busy = status === "streaming" || status === "queued";
@@ -58,6 +61,11 @@ export function PromptForm({
       temperature,
       max_tokens: maxTokens,
       stream,
+      gateway_tools: {
+        enabled: toolsEnabled,
+        time: toolsEnabled && timeToolEnabled,
+        web_search: toolsEnabled && webSearchEnabled,
+      },
     });
   }
 
@@ -159,6 +167,46 @@ export function PromptForm({
               onChange={(e) => setStream(e.target.checked)}
             />
             Streaming
+          </label>
+        </div>
+      </div>
+
+      <div className="params-grid">
+        <div className="param-item param-checkbox">
+          <label htmlFor="tools-toggle">
+            <input
+              id="tools-toggle"
+              type="checkbox"
+              checked={toolsEnabled}
+              onChange={(e) => setToolsEnabled(e.target.checked)}
+            />
+            Built-in tools
+          </label>
+        </div>
+
+        <div className="param-item param-checkbox">
+          <label htmlFor="time-tool-toggle">
+            <input
+              id="time-tool-toggle"
+              type="checkbox"
+              checked={timeToolEnabled}
+              disabled={!toolsEnabled}
+              onChange={(e) => setTimeToolEnabled(e.target.checked)}
+            />
+            Date / time
+          </label>
+        </div>
+
+        <div className="param-item param-checkbox">
+          <label htmlFor="search-tool-toggle">
+            <input
+              id="search-tool-toggle"
+              type="checkbox"
+              checked={webSearchEnabled}
+              disabled={!toolsEnabled}
+              onChange={(e) => setWebSearchEnabled(e.target.checked)}
+            />
+            Web search
           </label>
         </div>
       </div>
