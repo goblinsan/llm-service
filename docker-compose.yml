@@ -1,6 +1,9 @@
 services:
   llm-service:
-    build: ./wrapper
+    build:
+      context: ./wrapper
+      args:
+        LLAMA_CUDA_ARCHITECTURES: ${LLAMA_CUDA_ARCHITECTURES:-89}
     restart: unless-stopped
     ports:
       - "${HOST_PORT:-5301}:8080"

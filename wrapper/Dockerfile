@@ -5,11 +5,13 @@ ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
 # CUDA 12.4. Build llama.cpp from source against CUDA 12.4 instead so we keep
 # GPU compatibility and regain newer model-architecture support.
 ARG LLAMA_CPP_REF=master
+ARG LLAMA_CUDA_ARCHITECTURES=89
 
 FROM ${CUDA_DEVEL_IMAGE} AS llama-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG LLAMA_CPP_REF
+ARG LLAMA_CUDA_ARCHITECTURES
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -26,6 +28,7 @@ RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/refs/heads/${LLAMA
       | tar -xz --strip-components=1 && \
     cmake -S . -B build \
       -DGGML_CUDA=ON \
+      -DCMAKE_CUDA_ARCHITECTURES=${LLAMA_CUDA_ARCHITECTURES} \
       -DLLAMA_BUILD_SERVER=ON \
       -DLLAMA_BUILD_TESTS=OFF \
       -DLLAMA_BUILD_EXAMPLES=OFF \
