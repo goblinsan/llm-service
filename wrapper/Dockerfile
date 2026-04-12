@@ -24,11 +24,16 @@ RUN apt-get update && \
 
 WORKDIR /src/llama.cpp
 
-RUN curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/refs/heads/${LLAMA_CPP_REF}.tar.gz" \
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 && \
+    export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LIBRARY_PATH}" && \
+    export LD_LIBRARY_PATH="/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH}" && \
+    curl -fsSL "https://github.com/ggml-org/llama.cpp/archive/refs/heads/${LLAMA_CPP_REF}.tar.gz" \
       | tar -xz --strip-components=1 && \
     cmake -S . -B build \
       -DGGML_CUDA=ON \
       -DCMAKE_CUDA_ARCHITECTURES=${LLAMA_CUDA_ARCHITECTURES} \
+      -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
       -DLLAMA_BUILD_SERVER=ON \
       -DLLAMA_BUILD_TESTS=OFF \
       -DLLAMA_BUILD_EXAMPLES=OFF \
