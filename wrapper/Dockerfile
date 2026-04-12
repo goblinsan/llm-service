@@ -16,14 +16,13 @@ RUN apt-get update && \
       ca-certificates \
       cmake \
       curl \
-      git \
       python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/llama.cpp
 
-RUN git clone https://github.com/ggml-org/llama.cpp.git . && \
-    git checkout "${LLAMA_CPP_REF}" && \
+RUN curl -fsSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/${LLAMA_CPP_REF}" \
+      | tar -xz --strip-components=1 && \
     cmake -S . -B build \
       -DGGML_CUDA=ON \
       -DLLAMA_BUILD_SERVER=ON \
