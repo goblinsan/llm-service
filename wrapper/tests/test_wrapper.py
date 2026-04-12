@@ -413,6 +413,24 @@ class TestProxy:
         assert resp.json() == {"ok": True}
         mock_handler.assert_awaited_once()
 
+    def test_tool_shim_returns_structured_500_on_exception(self, client):
+        with patch(
+            "main._handle_builtin_tool_chat",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "what time is it?"}],
+                    "gateway_tools": {"enabled": True, "time": True, "web_search": False},
+                },
+            )
+
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["error"] == "builtin tool execution failed"
+        assert "RuntimeError: boom" in body["detail"]
+
 
 class TestBuiltinTools:
     def test_tool_prompt_only_lists_enabled_tools(self):

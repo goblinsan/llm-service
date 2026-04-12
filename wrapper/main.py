@@ -1196,6 +1196,15 @@ async def proxy(request: Request, path: str) -> Response:
     ):
         try:
             return await _handle_builtin_tool_chat(payload)
+        except Exception as exc:
+            log.exception("Built-in tool chat failed")
+            return JSONResponse(
+                {
+                    "error": "builtin tool execution failed",
+                    "detail": f"{exc.__class__.__name__}: {exc}",
+                },
+                status_code=500,
+            )
         finally:
             if is_inference:
                 _active_inference -= 1
