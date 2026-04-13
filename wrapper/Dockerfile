@@ -54,7 +54,7 @@ ENV LD_LIBRARY_PATH="/app:${LD_LIBRARY_PATH}"
 
 # Install Python tooling and isolate wrapper dependencies in a venv.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl libgomp1 && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl libgomp1 tzdata && \
     python3 -m venv "${VIRTUAL_ENV}" && \
     rm -rf /var/lib/apt/lists/*
 
