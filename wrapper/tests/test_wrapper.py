@@ -596,6 +596,32 @@ class TestBuiltinTools:
 
         assert response is None
 
+    def test_simple_time_request_matcher_accepts_standalone_time_question(self):
+        assert m._is_simple_time_request("what time is it, I'm in clearwater fl")
+
+    def test_simple_time_request_matcher_rejects_broader_prompt_with_date_context(self):
+        assert not m._is_simple_time_request(
+            "why would you recommend those plans, you know todays date and can find out when the triathlon is this year. give me a real plan."
+        )
+
+    def test_direct_time_handler_skips_broader_prompt_that_mentions_date(self):
+        response = asyncio.run(
+            m._maybe_handle_direct_time_request(
+                {
+                    "model": "local",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "why would you recommend those plans, you know todays date and can find out when the triathlon is this year. give me a real plan.",
+                        }
+                    ],
+                },
+                {"enabled": True, "time": True, "web_search": False},
+            )
+        )
+
+        assert response is None
+
     def test_direct_time_handler_uses_client_timezone_for_my_timezone(self):
         with patch(
             "main._time_tool_result",

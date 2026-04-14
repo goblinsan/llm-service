@@ -198,6 +198,21 @@ _ALT_TOOL_CALL_RE = re.compile(
 )
 _TIME_INTENT_RE = re.compile(r"\b(time|date|today|day|timezone|clock)\b", re.IGNORECASE)
 _TIME_LOCATION_RE = re.compile(r"\b(?:i am|i'm|im)\s+in\s+([a-z0-9 ,.\-]+)$", re.IGNORECASE)
+_DIRECT_TIME_REQUEST_RE = re.compile(
+    r"^\s*(?:"
+    r"what(?:'s| is)?\s+the\s+time(?:\s+is\s+it)?"
+    r"|what\s+time\s+is\s+it"
+    r"|what(?:'s| is)?\s+the\s+date"
+    r"|what\s+is\s+today'?s\s+date"
+    r"|today'?s\s+date"
+    r"|what\s+day\s+is\s+it"
+    r"|what\s+is\s+the\s+time\s+in\s+my\s+timezone"
+    r"|what\s+time\s+is\s+it\s+in\s+my\s+timezone"
+    r")"
+    r"(?:\s*,?\s*(?:i am|i'm|im)\s+in\s+[a-z0-9 ,.\-]+)?"
+    r"\s*[?.!]*\s*$",
+    re.IGNORECASE,
+)
 _DDG_RESULT_RE = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
     re.IGNORECASE | re.DOTALL,
@@ -415,6 +430,10 @@ def _extract_location_hint(user_text: str) -> Optional[str]:
     if match:
         return match.group(1).strip(" .")
     return None
+
+
+def _is_simple_time_request(user_text: str) -> bool:
+    return bool(_DIRECT_TIME_REQUEST_RE.match(user_text.strip()))
 
 
 def _merge_usage(total: dict[str, int], usage: Any) -> None:
@@ -744,6 +763,8 @@ async def _maybe_handle_direct_time_request(
         return None
     user_text = _latest_user_text(messages)
     if not user_text or not _TIME_INTENT_RE.search(user_text):
+        return None
+    if not _is_simple_time_request(user_text):
         return None
     lowered = user_text.lower()
     if "holiday" in lowered or "search" in lowered or "headline" in lowered or "news" in lowered:
