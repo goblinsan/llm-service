@@ -131,7 +131,16 @@ Response:
   "loaded_model_filename": "mistral-7b-v0.3.Q4_K_M.gguf",
   "ctx_size": 4096,
   "n_gpu_layers": -1,
-  "status": "ready"
+  "status": "ready",
+  "llama": {
+    "offloaded_layers": 32,
+    "total_layers": 32,
+    "flash_attn": true,
+    "cuda_device": "CUDA0",
+    "cuda_device_name": "NVIDIA GeForce RTX 3070",
+    "cuda_free_mib_at_load": 4096,
+    "recent_log_tail": ["..."]
+  }
 }
 ```
 
@@ -185,7 +194,7 @@ Response:
 
 ---
 
-
+### Download a model — `POST /api/models/download`
 
 Downloads a GGUF file from a URL into `/data/models/llm/` without rebuilding
 the container.
