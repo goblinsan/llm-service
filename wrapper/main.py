@@ -61,6 +61,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.parse
 import uuid
 from collections import deque
@@ -154,6 +155,19 @@ _llama_log_tail: deque[str] = deque(maxlen=200)
 # incrementing/decrementing this integer is safe without a lock (there is no
 # await between the check and the increment below).
 _active_inference: int = 0
+
+# Monotonic timestamp recorded when the module is first loaded.
+_start_time: float = time.monotonic()
+
+# Cumulative serving metrics — incremented atomically (asyncio single-thread).
+_metrics: dict[str, int] = {
+    "requests_total": 0,           # inference requests that entered service
+    "requests_rejected_429_total": 0,  # rejected because the concurrency slot was full
+    "requests_timeout_total": 0,   # inference requests that hit REQUEST_TIMEOUT
+    "requests_error_total": 0,     # backend connect/upstream errors
+    "model_load_total": 0,         # successful model-load transitions
+    "model_load_error_total": 0,   # failed model-load attempts
+}
 
 # Paths that count as inference requests (GPU-bound; subject to concurrency cap).
 _INFERENCE_PATHS: frozenset[str] = frozenset(
@@ -987,6 +1001,12 @@ async def _wait_for_llama(timeout: int = LLAMA_STARTUP_TIMEOUT) -> tuple[bool, O
 
 
 async def _on_startup() -> None:
+    if not ADMIN_TOKEN:
+        log.warning(
+            "ADMIN_TOKEN is not set — model management endpoints are UNAUTHENTICATED. "
+            "Set ADMIN_TOKEN in .env before deploying to a shared or production environment."
+        )
+
     if _SKIP_LLAMA_STARTUP:
         _state["status"] = "ready"
         log.info("SKIP_LLAMA_STARTUP=1 — skipping llama-server launch (test/dev mode)")
@@ -1092,6 +1112,39 @@ def node_capabilities() -> dict:
         "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
         "n_gpu_layers": _state["n_gpu_layers"],
         "llama": _get_llama_diagnostics(),
+    }
+
+
+@app.get("/api/metrics", summary="Per-node serving metrics")
+def serving_metrics() -> dict:
+    """
+    Returns cumulative serving counters and current node state for observability.
+
+    This endpoint is **read-only** and requires no authentication.
+
+    Fields:
+    * `uptime_seconds`               — seconds since the wrapper process started
+    * `active_requests`              — inference requests currently in flight
+    * `requests_total`               — total inference requests that entered service
+    * `requests_rejected_429_total`  — requests rejected because the concurrency slot was full
+    * `requests_timeout_total`       — requests abandoned after exceeding `REQUEST_TIMEOUT`
+    * `requests_error_total`         — requests that failed with a backend connect/upstream error
+    * `model_load_total`             — successful model-load (hot-swap) operations
+    * `model_load_error_total`       — model-load attempts that ended in error
+    * `request_timeout`              — configured `REQUEST_TIMEOUT` in seconds
+    * `max_concurrent_requests`      — configured `MAX_CONCURRENT_REQUESTS`
+    """
+    return {
+        "uptime_seconds": round(time.monotonic() - _start_time, 1),
+        "active_requests": _active_inference,
+        "requests_total": _metrics["requests_total"],
+        "requests_rejected_429_total": _metrics["requests_rejected_429_total"],
+        "requests_timeout_total": _metrics["requests_timeout_total"],
+        "requests_error_total": _metrics["requests_error_total"],
+        "model_load_total": _metrics["model_load_total"],
+        "model_load_error_total": _metrics["model_load_error_total"],
+        "request_timeout": REQUEST_TIMEOUT,
+        "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
     }
 
 
@@ -1313,6 +1366,7 @@ async def load_model(
     except Exception as exc:
         _state["status"] = "error"
         _state["error"] = "Failed to start llama-server"
+        _metrics["model_load_error_total"] += 1
         log.error("Failed to start llama-server with model %s: %s", req.filename, exc)
         return {
             "loaded_model": _state["model"],
@@ -1327,6 +1381,9 @@ async def load_model(
     _state["status"] = "ready" if ok else "error"
     if not ok:
         _state["error"] = detail or "llama-server did not become healthy after model switch"
+        _metrics["model_load_error_total"] += 1
+    else:
+        _metrics["model_load_total"] += 1
 
     return {
         "loaded_model": _state["model"],
@@ -1470,12 +1527,14 @@ async def proxy(request: Request, path: str) -> Response:
         # asyncio is single-threaded: the check and increment below are
         # atomic with respect to other coroutines (no await in between).
         if _active_inference >= MAX_CONCURRENT_REQUESTS:
+            _metrics["requests_rejected_429_total"] += 1
             return JSONResponse(
                 {"error": "inference slot busy, please retry later"},
                 status_code=429,
                 headers={"Retry-After": "5"},
             )
         _active_inference += 1
+        _metrics["requests_total"] += 1
 
     target_url = f"http://127.0.0.1:{LLAMA_PORT}/{path}"
     if request.url.query:
@@ -1549,18 +1608,21 @@ async def proxy(request: Request, path: str) -> Response:
         await client.aclose()
         if is_inference:
             _active_inference -= 1
+            _metrics["requests_error_total"] += 1
         log.warning("Proxy connect error: %s", exc)
         return JSONResponse({"error": "backend unavailable"}, status_code=503)
     except httpx.ReadTimeout:
         await client.aclose()
         if is_inference:
             _active_inference -= 1
+            _metrics["requests_timeout_total"] += 1
         log.warning("Inference request timed out after %.0fs", REQUEST_TIMEOUT)
         return JSONResponse({"error": "inference timeout"}, status_code=504)
     except Exception:
         await client.aclose()
         if is_inference:
             _active_inference -= 1
+            _metrics["requests_error_total"] += 1
         raise
 
     resp_headers = {
@@ -1612,6 +1674,7 @@ async def proxy(request: Request, path: str) -> Response:
                     yield chunk
         except httpx.ReadTimeout:
             log.warning("Inference response timed out during streaming")
+            _metrics["requests_timeout_total"] += 1
             if path == "v1/chat/completions":
                 # Terminate the SSE stream cleanly so the client is not left
                 # waiting for more data (issue #43).

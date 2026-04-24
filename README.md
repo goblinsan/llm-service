@@ -87,15 +87,19 @@ management endpoints are available on the same published port (default `5301`).
 
 ### Admin authentication
 
-Set `ADMIN_TOKEN` in `.env` to a strong random string.  All write endpoints
-(`POST /api/models/download` and `POST /api/models/load`) require the header:
+Set `ADMIN_TOKEN` in `.env` to a strong random string.  The following write endpoints require the header:
 
 ```
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
-When `ADMIN_TOKEN` is empty the admin endpoints are **unauthenticated** — do
-not leave it empty in production.
+| Write endpoint | Requires admin auth |
+|---|---|
+| `POST /api/models/download` | ✅ Yes |
+| `POST /api/models/load` | ✅ Yes |
+| `POST /api/models/unload` | ✅ Yes |
+
+When `ADMIN_TOKEN` is empty the admin endpoints are **unauthenticated** — the wrapper logs a warning at startup and all admin writes are open to any caller.  **Never leave `ADMIN_TOKEN` empty in production or in any environment shared with other services.**
 
 ---
 
@@ -699,6 +703,7 @@ This section defines the stable interface that **agent-service** (or any upstrea
 | Node capability snapshot | `http://<host>:<HOST_PORT>/api/node` |
 | Model inventory | `http://<host>:<HOST_PORT>/api/models` |
 | Readiness probe | `http://<host>:<HOST_PORT>/health` |
+| Serving metrics | `http://<host>:<HOST_PORT>/api/metrics` |
 
 Replace `<host>` and `<HOST_PORT>` (default `5301`) with the values from the deployment manifest.
 Do **not** hardcode private LAN addresses in agent-service configuration — resolve them at runtime from
@@ -710,6 +715,7 @@ the control-plane service registry.
 |---|---|
 | `GET /api/node` | ❌ None — read-only capability snapshot |
 | `GET /api/models` | ❌ None — read-only inventory |
+| `GET /api/metrics` | ❌ None — read-only serving metrics |
 | `GET /health` | ❌ None — readiness probe |
 | `GET /api/models/download/{task_id}` | ❌ None — read-only progress poll |
 | `POST /api/models/download` | ✅ `Authorization: Bearer <ADMIN_TOKEN>` |
@@ -774,6 +780,63 @@ capacity-full signal for load-shedding or re-routing to another node.
 The `max_concurrent_requests` value from `GET /api/node` lets agent-service estimate how many
 in-flight requests this node can absorb before it will start returning 429.
 
+### Timeout behaviour
+
+Inference requests that exceed `REQUEST_TIMEOUT` (default `120 s`) are abandoned with `HTTP 504`.
+Non-inference proxy requests (e.g. `GET /v1/models`) have no timeout.
+
+| Condition | HTTP status | Header |
+|---|---|---|
+| Model not loaded | `503 Service Unavailable` | — |
+| Model loading / switching | `503 Service Unavailable` | `Retry-After: 5` |
+| Concurrency slot full | `429 Too Many Requests` | `Retry-After: 5` |
+| Inference request timed out | `504 Gateway Timeout` | — |
+| Backend connect error | `503 Service Unavailable` | — |
+
+Callers should:
+1. Retry `503` with `Retry-After` header using the indicated delay before re-sending.
+2. Retry `429` with exponential back-off starting at the `Retry-After` value.
+3. Treat `504` as a terminal failure for the request and surface it to the caller.
+4. Never retry a `400`/`403`/`404` response — these indicate a bad request or configuration error.
+
+### Per-node serving metrics — `GET /api/metrics`
+
+Exposes cumulative counters and the current node state for monitoring.  No authentication is required.
+
+```bash
+curl -s http://<host>:5301/api/metrics | jq .
+```
+
+```json
+{
+  "uptime_seconds": 3600.0,
+  "active_requests": 0,
+  "requests_total": 142,
+  "requests_rejected_429_total": 3,
+  "requests_timeout_total": 1,
+  "requests_error_total": 0,
+  "model_load_total": 2,
+  "model_load_error_total": 0,
+  "request_timeout": 120.0,
+  "max_concurrent_requests": 1
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `uptime_seconds` | Seconds since the wrapper process started |
+| `active_requests` | Inference requests currently in flight |
+| `requests_total` | Total inference requests that entered service |
+| `requests_rejected_429_total` | Requests rejected because the concurrency slot was full |
+| `requests_timeout_total` | Requests abandoned after exceeding `REQUEST_TIMEOUT` |
+| `requests_error_total` | Requests that failed with a backend connect/upstream error |
+| `model_load_total` | Successful model-load (hot-swap) operations |
+| `model_load_error_total` | Model-load attempts that ended in error |
+| `request_timeout` | Configured `REQUEST_TIMEOUT` in seconds |
+| `max_concurrent_requests` | Configured `MAX_CONCURRENT_REQUESTS` |
+
+Counters are reset when the wrapper process restarts.  They are not persisted between restarts.
+
 ### Token budget
 
 The wrapper silently clamps `max_tokens` to `MAX_TOKENS` (default `2048`).  Agent-service
@@ -791,5 +854,7 @@ curl -s http://<host>:5301/api/models | jq '{loaded_model_filename, models: [.mo
 
 # 3. Confirm liveness (for health-check loop)
 curl -s http://<host>:5301/health | jq .status
-```
 
+# 4. Inspect serving metrics (for observability / alerting)
+curl -s http://<host>:5301/api/metrics | jq '{active_requests, requests_total, requests_rejected_429_total, requests_timeout_total}'
+```
