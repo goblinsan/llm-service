@@ -32,6 +32,7 @@ def reset_state(tmp_path):
     original_status = m._state["status"]
     original_ctx_size = m._state["ctx_size"]
     original_n_gpu_layers = m._state["n_gpu_layers"]
+    original_metrics = dict(m._metrics)
 
     m.MODELS_DIR = tmp_path
     m._state["status"] = "ready"
@@ -40,6 +41,8 @@ def reset_state(tmp_path):
     m._state["n_gpu_layers"] = -1
     m._state["error"] = None
     m._downloads.clear()
+    for key in m._metrics:
+        m._metrics[key] = 0
 
     yield tmp_path
 
@@ -50,6 +53,8 @@ def reset_state(tmp_path):
     m._state["n_gpu_layers"] = original_n_gpu_layers
     m._state["error"] = None
     m._downloads.clear()
+    for key, val in original_metrics.items():
+        m._metrics[key] = val
 
 
 @pytest.fixture(scope="session")
@@ -1097,3 +1102,117 @@ class TestGgufValidation:
         assert magic == b"GGUF"
         tmp.rename(dest)
         assert dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/metrics
+# ---------------------------------------------------------------------------
+
+
+class TestServingMetrics:
+    def test_returns_200(self, client):
+        resp = client.get("/api/metrics")
+        assert resp.status_code == 200
+
+    def test_required_fields_present(self, client):
+        body = client.get("/api/metrics").json()
+        for field in (
+            "uptime_seconds",
+            "active_requests",
+            "requests_total",
+            "requests_rejected_429_total",
+            "requests_timeout_total",
+            "requests_error_total",
+            "model_load_total",
+            "model_load_error_total",
+            "request_timeout",
+            "max_concurrent_requests",
+        ):
+            assert field in body, f"missing field: {field}"
+
+    def test_no_auth_required(self, client):
+        resp = client.get("/api/metrics")
+        assert resp.status_code == 200
+
+    def test_uptime_seconds_is_non_negative(self, client):
+        body = client.get("/api/metrics").json()
+        assert body["uptime_seconds"] >= 0
+
+    def test_active_requests_reflects_counter(self, client):
+        original = m._active_inference
+        m._active_inference = 2
+        try:
+            body = client.get("/api/metrics").json()
+            assert body["active_requests"] == 2
+        finally:
+            m._active_inference = original
+
+    def test_request_timeout_reflects_config(self, client):
+        body = client.get("/api/metrics").json()
+        assert body["request_timeout"] == m.REQUEST_TIMEOUT
+
+    def test_max_concurrent_requests_reflects_config(self, client):
+        body = client.get("/api/metrics").json()
+        assert body["max_concurrent_requests"] == m.MAX_CONCURRENT_REQUESTS
+
+    def test_rejected_counter_increments_on_429(self, client):
+        original_rejected = m._metrics["requests_rejected_429_total"]
+        original_active = m._active_inference
+        m._active_inference = m.MAX_CONCURRENT_REQUESTS
+        try:
+            client.post("/v1/chat/completions", json={"messages": []})
+            assert m._metrics["requests_rejected_429_total"] == original_rejected + 1
+        finally:
+            m._active_inference = original_active
+
+    def test_requests_total_increments_on_accepted_inference(self, client):
+        """requests_total should increment when a slot is acquired."""
+        original_total = m._metrics["requests_total"]
+        original_active = m._active_inference
+        # Simulate a slot being free, then request completes immediately (connect error)
+        m._active_inference = 0
+        try:
+            # The request will reach the proxy but fail with a connect error because
+            # llama-server is not running in tests — that still counts as accepted.
+            client.post("/v1/chat/completions", json={"messages": []})
+            assert m._metrics["requests_total"] >= original_total + 1
+        finally:
+            m._active_inference = original_active
+
+    def test_model_load_total_increments_on_success(self, client, reset_state):
+        models_dir: Path = reset_state
+        (models_dir / "good.gguf").write_bytes(b"GGUF" + b"\x00" * 10)
+        original = m._metrics["model_load_total"]
+
+        with (
+            patch("main._stop_llama"),
+            patch("main._start_llama", return_value=MagicMock()),
+            patch("main._wait_for_llama", new=AsyncMock(return_value=(True, None))),
+        ):
+            resp = client.post(
+                "/api/models/load",
+                json={"filename": "good.gguf"},
+                headers=ADMIN_HDR,
+            )
+
+        assert resp.status_code == 200
+        assert m._metrics["model_load_total"] == original + 1
+
+    def test_model_load_error_total_increments_on_failure(self, client, reset_state):
+        models_dir: Path = reset_state
+        (models_dir / "bad.gguf").write_bytes(b"GGUF" + b"\x00" * 10)
+        original = m._metrics["model_load_error_total"]
+
+        with (
+            patch("main._stop_llama"),
+            patch("main._start_llama", return_value=MagicMock()),
+            patch("main._wait_for_llama", new=AsyncMock(return_value=(False, "startup failed"))),
+        ):
+            resp = client.post(
+                "/api/models/load",
+                json={"filename": "bad.gguf"},
+                headers=ADMIN_HDR,
+            )
+
+        assert resp.status_code == 200
+        assert m._metrics["model_load_error_total"] == original + 1
