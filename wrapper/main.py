@@ -8,6 +8,7 @@ Manages a llama-server subprocess and exposes additional REST endpoints:
   GET  /api/models/download/{task_id} - poll download progress
   POST /api/models/load               - switch active model         (admin)
   POST /api/models/unload             - unload active model         (admin)
+  GET  /api/node                      - node capability metadata (for agent-service)
   GET  /health                        - readiness probe
   *    /*                             - transparent proxy to llama-server
 
@@ -1051,12 +1052,45 @@ def list_models() -> dict:
                     ),
                 }
             )
+    active_model_path = _state["model"] if _state["status"] in {"ready", "loading"} else ""
     return {
         "models": models,
-        "loaded_model": _state["model"] if _state["status"] in {"ready", "loading"} else "",
+        "loaded_model": active_model_path,
+        "loaded_model_filename": Path(active_model_path).name if active_model_path else "",
         "ctx_size": _state["ctx_size"],
         "n_gpu_layers": _state["n_gpu_layers"],
         "status": _state["status"],
+        "llama": _get_llama_diagnostics(),
+    }
+
+
+@app.get("/api/node", summary="Node capability metadata")
+def node_capabilities() -> dict:
+    """
+    Returns stable serving-capability metadata for this node.
+
+    Intended for consumption by agent-service or any upstream orchestrator
+    that needs to make routing decisions based on what this node can do.
+    This endpoint is **read-only** and requires no authentication.
+
+    Fields:
+    * `status`                — current readiness: `ok`, `loading`, `no-model`, or `error`
+    * `loaded_model`          — basename of the currently loaded GGUF file, or `""` if none
+    * `ctx_size`              — context window in tokens as configured for llama-server
+    * `max_tokens`            — per-request token cap enforced by the wrapper
+    * `max_concurrent_requests` — maximum simultaneous inference requests before HTTP 429
+    * `n_gpu_layers`          — number of model layers offloaded to GPU (-1 = all)
+    * `llama`                 — GPU/load diagnostics parsed from llama-server startup logs
+    """
+    active_model_path = _state["model"] if _state["status"] in {"ready", "loading"} else ""
+    status = "ok" if _state["status"] == "ready" else _state["status"]
+    return {
+        "status": status,
+        "loaded_model": Path(active_model_path).name if active_model_path else "",
+        "ctx_size": _state["ctx_size"],
+        "max_tokens": MAX_TOKENS,
+        "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
+        "n_gpu_layers": _state["n_gpu_layers"],
         "llama": _get_llama_diagnostics(),
     }
 

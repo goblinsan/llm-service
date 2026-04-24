@@ -183,10 +183,96 @@ class TestListModels:
         entry = next(e for e in body["models"] if e["filename"] == "other.gguf")
         assert entry["loaded"] is False
 
+    def test_loaded_model_filename_when_model_ready(self, client, reset_state):
+        models_dir: Path = reset_state
+        model_file = models_dir / "active-Q4_K_M.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 10)
+        m._state["model"] = str(model_file)
+        m._state["status"] = "ready"
+
+        body = client.get("/api/models").json()
+        assert body["loaded_model_filename"] == "active-Q4_K_M.gguf"
+        assert body["loaded_model"].endswith("active-Q4_K_M.gguf")
+
+    def test_loaded_model_filename_empty_when_no_model(self, client, reset_state):
+        m._state["status"] = "no-model"
+        m._state["model"] = ""
+
+        body = client.get("/api/models").json()
+        assert body["loaded_model_filename"] == ""
+        assert body["loaded_model"] == ""
+
 
 # ---------------------------------------------------------------------------
-# POST /api/models/download
+# GET /api/node
 # ---------------------------------------------------------------------------
+
+
+class TestNodeCapabilities:
+    def test_returns_200(self, client):
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+
+    def test_status_reflects_state(self, client):
+        m._state["status"] = "ready"
+        body = client.get("/api/node").json()
+        assert body["status"] == "ok"
+
+    def test_status_loading(self, client):
+        m._state["status"] = "loading"
+        body = client.get("/api/node").json()
+        assert body["status"] == "loading"
+
+    def test_status_no_model(self, client):
+        m._state["status"] = "no-model"
+        body = client.get("/api/node").json()
+        assert body["status"] == "no-model"
+
+    def test_loaded_model_is_filename_only(self, client, reset_state):
+        models_dir: Path = reset_state
+        model_file = models_dir / "mistral-7b-v0.3.Q4_K_M.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 10)
+        m._state["model"] = str(model_file)
+        m._state["status"] = "ready"
+
+        body = client.get("/api/node").json()
+        assert body["loaded_model"] == "mistral-7b-v0.3.Q4_K_M.gguf"
+        assert "/" not in body["loaded_model"]
+
+    def test_loaded_model_empty_when_no_model(self, client, reset_state):
+        m._state["status"] = "no-model"
+        m._state["model"] = ""
+
+        body = client.get("/api/node").json()
+        assert body["loaded_model"] == ""
+
+    def test_capability_fields_present(self, client):
+        body = client.get("/api/node").json()
+        for field in ("ctx_size", "max_tokens", "max_concurrent_requests", "n_gpu_layers", "llama"):
+            assert field in body, f"missing field: {field}"
+
+    def test_ctx_size_matches_state(self, client):
+        m._state["ctx_size"] = 8192
+        body = client.get("/api/node").json()
+        assert body["ctx_size"] == 8192
+
+    def test_max_tokens_reflects_config(self, client):
+        body = client.get("/api/node").json()
+        assert body["max_tokens"] == m.MAX_TOKENS
+
+    def test_max_concurrent_requests_reflects_config(self, client):
+        body = client.get("/api/node").json()
+        assert body["max_concurrent_requests"] == m.MAX_CONCURRENT_REQUESTS
+
+    def test_n_gpu_layers_matches_state(self, client):
+        m._state["n_gpu_layers"] = 20
+        body = client.get("/api/node").json()
+        assert body["n_gpu_layers"] == 20
+
+    def test_no_auth_required(self, client):
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+
 
 
 class TestDownloadModel:

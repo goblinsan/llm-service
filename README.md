@@ -128,9 +128,69 @@ Response:
     }
   ],
   "loaded_model": "/data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf",
-  "status": "ready"
+  "loaded_model_filename": "mistral-7b-v0.3.Q4_K_M.gguf",
+  "ctx_size": 4096,
+  "n_gpu_layers": -1,
+  "status": "ready",
+  "llama": {
+    "offloaded_layers": 32,
+    "total_layers": 32,
+    "flash_attn": true,
+    "cuda_device": "CUDA0",
+    "cuda_device_name": "NVIDIA GeForce RTX 3070",
+    "cuda_free_mib_at_load": 4096,
+    "recent_log_tail": ["..."]
+  }
 }
 ```
+
+`loaded_model_filename` is the basename of the active model (empty string when no model is loaded).
+Orchestrators should prefer this field over `loaded_model` when they only need to identify the model
+by name rather than by its container-local path.
+
+---
+
+### Node capability metadata — `GET /api/node`
+
+Returns stable, read-only metadata that describes what this node can serve.
+No authentication is required.  Intended for upstream routing agents that need to inspect
+context limits, concurrency caps, and GPU configuration before dispatching requests.
+
+```bash
+curl -s http://localhost:5301/api/node | jq .
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "loaded_model": "mistral-7b-v0.3.Q4_K_M.gguf",
+  "ctx_size": 4096,
+  "max_tokens": 2048,
+  "max_concurrent_requests": 1,
+  "n_gpu_layers": -1,
+  "llama": {
+    "offloaded_layers": 32,
+    "total_layers": 32,
+    "flash_attn": true,
+    "cuda_device": "CUDA0",
+    "cuda_device_name": "NVIDIA GeForce RTX 3070",
+    "cuda_free_mib_at_load": 4096,
+    "recent_log_tail": ["..."]
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `status` | Current readiness: `ok`, `loading`, `no-model`, or `error` |
+| `loaded_model` | Basename of the active GGUF file; empty string when no model is loaded |
+| `ctx_size` | Context window configured for llama-server (tokens) |
+| `max_tokens` | Per-request token cap enforced by the wrapper (`MAX_TOKENS` env var) |
+| `max_concurrent_requests` | Maximum simultaneous inference requests before HTTP 429 (`MAX_CONCURRENT_REQUESTS` env var) |
+| `n_gpu_layers` | Layers offloaded to GPU; `-1` = all layers |
+| `llama` | GPU/load diagnostics parsed from llama-server startup logs |
 
 ---
 
@@ -231,6 +291,7 @@ A future gateway-control-plane admin UI can integrate using these endpoints:
 
 | Action | Endpoint |
 |---|---|
+| Inspect node capabilities | `GET /api/node` |
 | Populate model picker | `GET /api/models` |
 | Download a new model | `POST /api/models/download` + poll `GET /api/models/download/{task_id}` |
 | Switch active model | `POST /api/models/load` + poll `GET /health` |
@@ -623,3 +684,112 @@ The wrapper enforces these limits automatically — no per-agent configuration i
 | Request timeout | 120 s | `REQUEST_TIMEOUT` env var |
 | Concurrent inference slots | 1 | `MAX_CONCURRENT_REQUESTS` env var |
 | Response when slot is busy | `HTTP 429` with `Retry-After: 5` | — |
+
+---
+
+## Agent-service integration contract
+
+This section defines the stable interface that **agent-service** (or any upstream orchestrator building a multi-node backend pool) should use to consume this service.  `llm-service` exposes the facts; routing policy belongs in the orchestrator.
+
+### Service URLs
+
+| Purpose | URL |
+|---|---|
+| Inference | `http://<host>:<HOST_PORT>/v1/chat/completions` |
+| Node capability snapshot | `http://<host>:<HOST_PORT>/api/node` |
+| Model inventory | `http://<host>:<HOST_PORT>/api/models` |
+| Readiness probe | `http://<host>:<HOST_PORT>/health` |
+
+Replace `<host>` and `<HOST_PORT>` (default `5301`) with the values from the deployment manifest.
+Do **not** hardcode private LAN addresses in agent-service configuration — resolve them at runtime from
+the control-plane service registry.
+
+### Authentication expectations
+
+| Endpoint | Auth required |
+|---|---|
+| `GET /api/node` | ❌ None — read-only capability snapshot |
+| `GET /api/models` | ❌ None — read-only inventory |
+| `GET /health` | ❌ None — readiness probe |
+| `GET /api/models/download/{task_id}` | ❌ None — read-only progress poll |
+| `POST /api/models/download` | ✅ `Authorization: Bearer <ADMIN_TOKEN>` |
+| `POST /api/models/load` | ✅ `Authorization: Bearer <ADMIN_TOKEN>` |
+| `POST /api/models/unload` | ✅ `Authorization: Bearer <ADMIN_TOKEN>` |
+| `POST /v1/chat/completions` (and other `/v1/*`) | ❌ None by default |
+
+The `ADMIN_TOKEN` must be stored in the agent-service's secret store and never exposed to end users.
+
+### Polling pattern for agent-service registration
+
+When agent-service registers a new `llm-service` node, it should:
+
+1. **Poll `GET /api/node`** to confirm the node is `"status": "ok"` and has a model loaded.
+2. **Read `GET /api/node`** to cache `ctx_size`, `max_tokens`, `max_concurrent_requests`,
+   and `loaded_model` for routing decisions.
+3. **Refresh periodically** (e.g. every 30 s or on inference error) — the loaded model and
+   capability values can change if the operator hot-swaps a model via `POST /api/models/load`.
+
+### Health and readiness semantics
+
+`GET /health` and `GET /api/node` both return a `status` field:
+
+| `status` | HTTP code (`/health`) | Meaning | Inference safe? |
+|---|---|---|---|
+| `ok` | 200 | llama-server is ready | ✅ Yes |
+| `loading` | 503 | Starting up or switching model | ❌ No — retry after `Retry-After` header |
+| `no-model` | 503 | No GGUF loaded yet | ❌ No — operator must load a model first |
+| `error` | 503 | llama-server failed | ❌ No — check `detail` for the reason |
+
+`GET /api/node` always returns HTTP 200 regardless of status so orchestrators can always read
+capability metadata even when the node is not serving inference.
+
+### Model inventory semantics
+
+`GET /api/models` lists every `.gguf` file present in `MODELS_DIR` alongside a per-file `loaded` flag.
+The top-level `loaded_model_filename` field is the stable, portable identifier to use for routing:
+
+```json
+{
+  "loaded_model_filename": "mistral-7b-v0.3.Q4_K_M.gguf",
+  "models": [
+    { "filename": "mistral-7b-v0.3.Q4_K_M.gguf", "loaded": true, ... },
+    { "filename": "llama-3.1-8b-Q5_K_S.gguf",    "loaded": false, ... }
+  ]
+}
+```
+
+* `loaded_model_filename` is the basename only (no path) — it is safe to compare across nodes even
+  if the absolute `MODELS_DIR` differs between deployments.
+* A model entry with `"loaded": true` means llama-server is actively serving that model.
+* Only one model can be loaded at a time; `"loaded": false` means the file is present but idle.
+* `loaded_model_filename` is an empty string when `status` is `no-model` or `error`.
+
+### Concurrency and back-pressure
+
+Each node enforces `MAX_CONCURRENT_REQUESTS` (default `1`).  When the slot is occupied,
+further inference requests receive `HTTP 429` with a `Retry-After: 5` header.  Agent-service
+should implement an exponential-backoff retry on 429 and treat a sustained 429 as a
+capacity-full signal for load-shedding or re-routing to another node.
+
+The `max_concurrent_requests` value from `GET /api/node` lets agent-service estimate how many
+in-flight requests this node can absorb before it will start returning 429.
+
+### Token budget
+
+The wrapper silently clamps `max_tokens` to `MAX_TOKENS` (default `2048`).  Agent-service
+**must not** send requests with a `max_tokens` value larger than the `max_tokens` field
+returned by `GET /api/node` — doing so will result in truncated responses without an error.
+
+### Minimal polling example
+
+```bash
+# 1. Check readiness
+curl -s http://<host>:5301/api/node | jq '{status, loaded_model, ctx_size, max_tokens, max_concurrent_requests}'
+
+# 2. List available models
+curl -s http://<host>:5301/api/models | jq '{loaded_model_filename, models: [.models[] | {filename, loaded}]}'
+
+# 3. Confirm liveness (for health-check loop)
+curl -s http://<host>:5301/health | jq .status
+```
+
