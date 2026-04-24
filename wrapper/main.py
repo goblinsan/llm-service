@@ -1674,8 +1674,7 @@ async def proxy(request: Request, path: str) -> Response:
                     yield chunk
         except httpx.ReadTimeout:
             log.warning("Inference response timed out during streaming")
-            if is_inference:
-                _metrics["requests_timeout_total"] += 1
+            _metrics["requests_timeout_total"] += 1
             if path == "v1/chat/completions":
                 # Terminate the SSE stream cleanly so the client is not left
                 # waiting for more data (issue #43).
