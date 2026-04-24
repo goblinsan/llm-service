@@ -502,6 +502,13 @@ This shim is only needed when function-calling is required; for plain chat and t
 
 ### Built-in local tools (`gateway_tools`)
 
+> ⚠️ **Transitional feature — do not expand.**
+> `gateway_tools` is a convenience shim for direct operator use only.
+> General-purpose tool orchestration belongs in **agent-service**, not here.
+> This path will not be extended with new tools or capabilities; new integrations
+> should rely on agent-service owning the tool-execution loop instead
+> (see [When agent-service owns tool execution](#when-agent-service-owns-tool-execution)).
+
 For local operator use, `llm-service` can optionally run a lightweight wrapper-side tool loop for:
 
 1. `time_now`
@@ -527,6 +534,7 @@ Notes:
 * This is a wrapper-specific extension, not standard OpenAI `tool_calls`.
 * The wrapper prompts the model to emit a deterministic `<tool_call>{...}</tool_call>` block, executes the tool, then asks the model for a final answer.
 * Streaming remains available, but tool-enabled requests are resolved server-side before the final answer is streamed back.
+* **Do not use `gateway_tools` in agent-service or automated orchestration pipelines.** Use plain `/v1/chat/completions` requests instead and let agent-service own the tool-execution loop.
 
 ---
 
@@ -858,3 +866,61 @@ curl -s http://<host>:5301/health | jq .status
 # 4. Inspect serving metrics (for observability / alerting)
 curl -s http://<host>:5301/api/metrics | jq '{active_requests, requests_total, requests_rejected_429_total, requests_timeout_total}'
 ```
+
+---
+
+### When agent-service owns tool execution
+
+When an upstream orchestrator (e.g. **agent-service**) owns the tool-execution loop, `llm-service`
+acts as a **raw inference node only**.  Send standard `/v1/chat/completions` requests without the
+`gateway_tools` extension and let agent-service handle function calling, result injection, and
+multi-turn tool loops.
+
+#### What to send
+
+```json
+{
+  "model": "local",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user",   "content": "What is the weather in New York?"},
+    {"role": "assistant", "content": "<tool_call>{\"name\":\"weather\",\"arguments\":{\"location\":\"New York\"}}</tool_call>"},
+    {"role": "tool",   "content": "Sunny, 22 °C"},
+    {"role": "user",   "content": "Thanks, summarise that."}
+  ],
+  "stream": true,
+  "max_tokens": 512
+}
+```
+
+Agent-service builds the full conversation (including injected tool results) and calls
+`POST /v1/chat/completions` with the assembled message list.  `llm-service` forwards the request
+directly to llama-server — it does **not** inspect or re-execute tool calls in the messages.
+
+#### What llm-service provides in this mode
+
+| Responsibility | Owner |
+|---|---|
+| Raw text generation | `llm-service` (llama-server) |
+| Tool call detection | agent-service |
+| Tool execution | agent-service |
+| Result injection into conversation | agent-service |
+| Multi-turn tool loop | agent-service |
+| Model routing / load balancing | agent-service |
+
+#### Stable inference contract for orchestrators
+
+* **No `gateway_tools` field** — omit it entirely; the request is forwarded to llama-server as-is.
+* **Model name echoing** — the `model` field in every response (streaming and non-streaming) echoes
+  the value sent in the request, regardless of the loaded GGUF filename.  Use any stable alias
+  (e.g. `"local"`, `"llm-node-0"`) for routing identity.
+* **`GET /api/node` always returns HTTP 200** — orchestrators can always read capability metadata
+  (`ctx_size`, `max_tokens`, `max_concurrent_requests`, `status`) even when the node is not serving
+  inference (e.g. while loading or after a crash).
+* **`GET /health` and `GET /api/node` share the same `status` field values** (`ok`, `loading`,
+  `no-model`, `error`) — use `/api/node` for polling (always 200) and `/health` for
+  liveness-probe semantics (returns 503 for any non-`ok` state).
+* **503 with `Retry-After: 5`** is returned for inference requests during `loading` and `error`
+  states; **503 without `Retry-After`** is returned when `status` is `no-model`.
+* **429 with `Retry-After: 5`** when the concurrency slot is full — implement exponential backoff
+  in the orchestrator starting at the indicated delay.
