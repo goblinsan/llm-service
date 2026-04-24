@@ -101,11 +101,20 @@ class TestHealth:
     def test_loading(self, client):
         m._state["status"] = "loading"
         resp = client.get("/health")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == "5"
         body = resp.json()
         assert body["status"] == "loading"
         assert body["ctx_size"] == 4096
         assert body["n_gpu_layers"] == -1
+
+    def test_no_model(self, client):
+        m._state["status"] = "no-model"
+        m._state["error"] = "no model found"
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "no-model"
 
     def test_error(self, client):
         m._state["status"] = "error"
@@ -328,7 +337,7 @@ class TestLoadModel:
             patch("main._start_llama", return_value=MagicMock()) as mock_start,
             patch(
                 "main._wait_for_llama",
-                new=AsyncMock(return_value=True),
+                new=AsyncMock(return_value=(True, None)),
             ),
         ):
             resp = client.post(
@@ -354,7 +363,7 @@ class TestLoadModel:
             patch("main._start_llama", return_value=MagicMock()),
             patch(
                 "main._wait_for_llama",
-                new=AsyncMock(return_value=False),
+                new=AsyncMock(return_value=(False, "test startup error")),
             ),
         ):
             resp = client.post(
@@ -430,6 +439,104 @@ class TestProxy:
         body = resp.json()
         assert body["error"] == "builtin tool execution failed"
         assert "RuntimeError: boom" in body["detail"]
+
+    def test_returns_503_with_retry_after_when_loading(self, client):
+        m._state["status"] = "loading"
+        resp = client.get("/v1/models")
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == "5"
+
+    def test_model_name_preserved_in_non_streaming_response(self, reset_state):
+        """The 'model' field in a non-streaming response should echo the caller's value."""
+        import json as _json
+        from unittest.mock import MagicMock
+
+        captured_body = {}
+
+        async def fake_send(self_arg, req, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {"content-type": "application/json"}
+            upstream_body = _json.dumps(
+                {
+                    "id": "chatcmpl-abc",
+                    "object": "chat.completion",
+                    "model": "some-internal-path.gguf",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "hello"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            ).encode()
+
+            async def aiter_raw():
+                yield upstream_body
+
+            async def aclose():
+                pass
+
+            resp.aiter_raw = aiter_raw
+            resp.aclose = aclose
+            return resp
+
+        with patch.object(m.httpx.AsyncClient, "send", new=fake_send):
+            from fastapi.testclient import TestClient
+
+            with TestClient(m.app) as c:
+                resp = c.post(
+                    "/v1/chat/completions",
+                    json={"messages": [], "model": "my-named-model", "stream": False},
+                )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["model"] == "my-named-model"
+
+    def test_model_name_preserved_in_streaming_response(self, reset_state):
+        """Each SSE chunk's 'model' field should be rewritten to the caller's value."""
+        import json as _json
+        from unittest.mock import MagicMock
+
+        chunk_data = {
+            "id": "chatcmpl-abc",
+            "object": "chat.completion.chunk",
+            "model": "some-internal-path.gguf",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+        }
+        sse_chunk = f"data: {_json.dumps(chunk_data)}\n\ndata: [DONE]\n\n".encode()
+
+        async def fake_send(self_arg, req, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {"content-type": "text/event-stream"}
+
+            async def aiter_raw():
+                yield sse_chunk
+
+            async def aclose():
+                pass
+
+            resp.aiter_raw = aiter_raw
+            resp.aclose = aclose
+            return resp
+
+        with patch.object(m.httpx.AsyncClient, "send", new=fake_send):
+            from fastapi.testclient import TestClient
+
+            with TestClient(m.app) as c:
+                resp = c.post(
+                    "/v1/chat/completions",
+                    json={"messages": [], "model": "caller-model", "stream": True},
+                )
+
+        assert resp.status_code == 200
+        lines = [line for line in resp.text.splitlines() if line.startswith("data: ")]
+        data_line = next(l for l in lines if l != "data: [DONE]")
+        chunk = _json.loads(data_line[6:])
+        assert chunk["model"] == "caller-model"
 
 
 class TestBuiltinTools:
@@ -728,6 +835,36 @@ class TestBuiltinTools:
         assert body["choices"][0]["message"]["content"] == "Here is the answer."
         assert body["usage"]["prompt_tokens"] == 42
 
+    def test_tool_chat_preserves_requested_model_name(self):
+        """The model field in the response must echo the caller's requested model."""
+        llama_response = {
+            "id": "chatcmpl-xyz",
+            "model": "internal-server-model-path.gguf",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "The answer is 42."},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        }
+
+        with patch("main._call_llama_chat", new=AsyncMock(return_value=(200, {}, llama_response))):
+            resp = asyncio.run(
+                m._handle_builtin_tool_chat(
+                    {
+                        "model": "caller-requested-model",
+                        "messages": [{"role": "user", "content": "what is 6*7?"}],
+                        "stream": False,
+                        "gateway_tools": {"enabled": True, "time": True, "web_search": False},
+                    }
+                )
+            )
+
+        assert resp.status_code == 200
+        body = json.loads(resp.body.decode())
+        assert body["model"] == "caller-requested-model"
 
 # ---------------------------------------------------------------------------
 # Concurrency guard — 429 when inference slot is busy

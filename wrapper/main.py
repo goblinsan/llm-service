@@ -289,8 +289,7 @@ Rules:
 - After you receive a system message beginning with TOOL RESULT, either answer directly or emit one more tool call if you still need more information.
 - Prefer `time_now` for date/time questions.
 - If a user gives a location like a city or state, pass it as `{{"location":"..."}}` to `time_now`.
-- For web questions, use `web_search` first. If the search snippets are insufficient, use `web_read` on the most relevant result before answering.
-- Do not invent tool results.
+{web_search_rule}- Do not invent tool results.
 """
 
 
@@ -398,8 +397,14 @@ def _tool_system_message(config: dict[str, bool]) -> str:
     if config.get("web_search"):
         tool_defs.append('- `web_search`: search the public web. Required arguments: {"query":"search terms"}')
         tool_defs.append('- `web_read`: fetch and read a web page. Required arguments: {"url":"https://..."}')
+    web_search_rule = (
+        "- For web questions, use `web_search` first. If the search snippets are insufficient, use `web_read` on the most relevant result before answering.\n"
+        if config.get("web_search")
+        else ""
+    )
     return _TOOL_PROMPT_TEMPLATE.format(
         tool_definitions="\n".join(tool_defs) if tool_defs else "- none",
+        web_search_rule=web_search_rule,
     )
 
 
@@ -672,9 +677,40 @@ async def _call_llama_chat(payload: dict[str, Any]) -> tuple[int, dict[str, str]
     return response.status_code, headers, data
 
 
-def _sse_response_from_chat_json(chat_response: dict[str, Any]) -> StreamingResponse:
+def _rewrite_sse_model(event_bytes: bytes, model: str) -> bytes:
+    """Rewrite the ``model`` field inside a single SSE event block.
+
+    Handles both ``data: <json>`` lines and pass-through lines (comments,
+    ``event:``, ``data: [DONE]``) unchanged.
+    """
+    try:
+        text = event_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return event_bytes
+    lines = text.split("\n")
+    rewritten: list[str] = []
+    for line in lines:
+        if line.startswith("data: "):
+            data_str = line[6:]
+            if data_str.strip() != "[DONE]":
+                try:
+                    data = json.loads(data_str)
+                    if isinstance(data, dict) and "model" in data:
+                        data["model"] = model
+                        line = f"data: {json.dumps(data, separators=(',', ':'))}"
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        rewritten.append(line)
+    return "\n".join(rewritten).encode("utf-8")
+
+
+def _sse_response_from_chat_json(
+    chat_response: dict[str, Any],
+    *,
+    requested_model: Optional[str] = None,
+) -> StreamingResponse:
     content = _extract_text_content(chat_response)
-    model = chat_response.get("model", "local")
+    model = requested_model or chat_response.get("model", "local")
     response_id = chat_response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
     created = int(chat_response.get("created") or dt.datetime.now().timestamp())
     usage = chat_response.get("usage")
@@ -794,6 +830,8 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
     config = _tool_config_from_payload(payload)
     stripped_payload = {k: v for k, v in payload.items() if k != "gateway_tools"}
     stripped_payload["stream"] = False
+    # Preserve the caller's requested model name so all responses echo it back.
+    requested_model: str = str(payload.get("model") or "local")
 
     base_messages = payload.get("messages")
     if not isinstance(base_messages, list):
@@ -801,7 +839,11 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
 
     direct_time_response = await _maybe_handle_direct_time_request(payload, config)
     if direct_time_response is not None:
-        return _sse_response_from_chat_json(direct_time_response) if stream_requested else JSONResponse(direct_time_response)
+        return (
+            _sse_response_from_chat_json(direct_time_response, requested_model=requested_model)
+            if stream_requested
+            else JSONResponse(direct_time_response)
+        )
 
     tool_prompt = {"role": "system", "content": _tool_system_message(config)}
     conversation = [tool_prompt, *base_messages]
@@ -820,7 +862,12 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
         if not tool_call:
             if total_usage:
                 chat_response["usage"] = total_usage
-            return _sse_response_from_chat_json(chat_response) if stream_requested else JSONResponse(chat_response)
+            chat_response["model"] = requested_model
+            return (
+                _sse_response_from_chat_json(chat_response, requested_model=requested_model)
+                if stream_requested
+                else JSONResponse(chat_response)
+            )
 
         tool_result = await _execute_tool_call(tool_call)
         conversation.extend(
@@ -841,7 +888,7 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(dt.datetime.now().timestamp()),
-        "model": stripped_payload.get("model", "local"),
+        "model": requested_model,
         "choices": [
             {
                 "index": 0,
@@ -853,9 +900,14 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
             }
         ],
     }
+    fallback["model"] = requested_model
     if total_usage:
         fallback["usage"] = total_usage
-    return _sse_response_from_chat_json(fallback) if stream_requested else JSONResponse(fallback)
+    return (
+        _sse_response_from_chat_json(fallback, requested_model=requested_model)
+        if stream_requested
+        else JSONResponse(fallback)
+    )
 
 
 def _start_llama(model_path: str, ctx_size: int, n_gpu_layers: int) -> subprocess.Popen:
@@ -1295,12 +1347,16 @@ def health() -> Response:
     * `{"status":"error"}`   — llama-server failed to start or become healthy.
     """
     if _state["status"] == "loading":
-        return JSONResponse({
-            "status": "loading",
-            "ctx_size": _state["ctx_size"],
-            "n_gpu_layers": _state["n_gpu_layers"],
-            "llama": _get_llama_diagnostics(),
-        })
+        return JSONResponse(
+            {
+                "status": "loading",
+                "ctx_size": _state["ctx_size"],
+                "n_gpu_layers": _state["n_gpu_layers"],
+                "llama": _get_llama_diagnostics(),
+            },
+            status_code=503,
+            headers={"Retry-After": "5"},
+        )
     if _state["status"] == "no-model":
         return JSONResponse(
             {
@@ -1310,6 +1366,7 @@ def health() -> Response:
                 "n_gpu_layers": _state["n_gpu_layers"],
                 "llama": _get_llama_diagnostics(),
             },
+            status_code=503,
         )
     if _state["status"] == "error":
         return JSONResponse(
@@ -1364,6 +1421,7 @@ async def proxy(request: Request, path: str) -> Response:
         return JSONResponse(
             {"error": "model is loading, please retry later"},
             status_code=503,
+            headers={"Retry-After": "5"},
         )
 
     is_inference = path in _INFERENCE_PATHS
@@ -1396,21 +1454,25 @@ async def proxy(request: Request, path: str) -> Response:
     body = await request.body()
     payload: Optional[dict[str, Any]] = None
 
+    # Parse request body for chat/completions paths so we can enforce the
+    # token budget and later rewrite the model name in the response.
+    if is_inference and body:
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass  # malformed body — let llama-server handle it
+
     # ------------------------------------------------------------------ #
     # Token-budget enforcement — silently clamp max_tokens to MAX_TOKENS  #
     # so a single request cannot monopolise VRAM via a huge KV cache.     #
     # ------------------------------------------------------------------ #
-    if is_inference and path in _TOKEN_BUDGET_PATHS and body:
-        try:
-            payload = json.loads(body)
-            effective_max = payload.get("max_tokens")
-            if effective_max is None or effective_max > MAX_TOKENS:
-                payload["max_tokens"] = MAX_TOKENS
-                body = json.dumps(payload).encode()
-                fwd_headers["content-length"] = str(len(body))
-                fwd_headers.setdefault("content-type", "application/json")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            pass  # malformed body — let llama-server handle it
+    if isinstance(payload, dict) and path in _TOKEN_BUDGET_PATHS:
+        effective_max = payload.get("max_tokens")
+        if effective_max is None or effective_max > MAX_TOKENS:
+            payload["max_tokens"] = MAX_TOKENS
+            body = json.dumps(payload).encode()
+            fwd_headers["content-length"] = str(len(body))
+            fwd_headers.setdefault("content-type", "application/json")
 
     if (
         path == "v1/chat/completions"
@@ -1472,12 +1534,53 @@ async def proxy(request: Request, path: str) -> Response:
         if k.lower() not in _HOP_BY_HOP
     }
 
+    # Extract the caller's requested model name for response rewriting
+    # (issue #42: preserve requested model name end-to-end).
+    requested_model: Optional[str] = (
+        payload.get("model") if isinstance(payload, dict) else None
+    ) or None
+    is_streaming_chat = (
+        path == "v1/chat/completions"
+        and isinstance(payload, dict)
+        and bool(payload.get("stream"))
+    )
+    rewrite_model = bool(requested_model and path == "v1/chat/completions")
+
     async def body_gen():
         try:
-            async for chunk in upstream_resp.aiter_raw():
-                yield chunk
+            if rewrite_model:
+                if is_streaming_chat:
+                    # SSE stream: buffer until we have complete events (\n\n
+                    # terminated) and rewrite the model field in each one.
+                    buf = b""
+                    async for chunk in upstream_resp.aiter_raw():
+                        buf += chunk
+                        while b"\n\n" in buf:
+                            event, buf = buf.split(b"\n\n", 1)
+                            yield _rewrite_sse_model(event, requested_model) + b"\n\n"
+                    if buf:
+                        yield _rewrite_sse_model(buf, requested_model)
+                else:
+                    # Non-streaming JSON: buffer full body, then rewrite.
+                    full = b""
+                    async for chunk in upstream_resp.aiter_raw():
+                        full += chunk
+                    try:
+                        data = json.loads(full)
+                        if isinstance(data, dict):
+                            data["model"] = requested_model
+                        yield json.dumps(data).encode()
+                    except (json.JSONDecodeError, ValueError):
+                        yield full
+            else:
+                async for chunk in upstream_resp.aiter_raw():
+                    yield chunk
         except httpx.ReadTimeout:
             log.warning("Inference response timed out during streaming")
+            if path == "v1/chat/completions":
+                # Terminate the SSE stream cleanly so the client is not left
+                # waiting for more data (issue #43).
+                yield b"data: [DONE]\n\n"
         finally:
             await upstream_resp.aclose()
             await client.aclose()
