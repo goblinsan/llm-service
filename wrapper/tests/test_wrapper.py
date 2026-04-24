@@ -448,16 +448,12 @@ class TestProxy:
 
     def test_model_name_preserved_in_non_streaming_response(self, reset_state):
         """The 'model' field in a non-streaming response should echo the caller's value."""
-        import json as _json
-        from unittest.mock import MagicMock
-
-        captured_body = {}
 
         async def fake_send(self_arg, req, **kwargs):
             resp = MagicMock()
             resp.status_code = 200
             resp.headers = {"content-type": "application/json"}
-            upstream_body = _json.dumps(
+            upstream_body = json.dumps(
                 {
                     "id": "chatcmpl-abc",
                     "object": "chat.completion",
@@ -497,16 +493,13 @@ class TestProxy:
 
     def test_model_name_preserved_in_streaming_response(self, reset_state):
         """Each SSE chunk's 'model' field should be rewritten to the caller's value."""
-        import json as _json
-        from unittest.mock import MagicMock
-
         chunk_data = {
             "id": "chatcmpl-abc",
             "object": "chat.completion.chunk",
             "model": "some-internal-path.gguf",
             "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
         }
-        sse_chunk = f"data: {_json.dumps(chunk_data)}\n\ndata: [DONE]\n\n".encode()
+        sse_chunk = f"data: {json.dumps(chunk_data)}\n\ndata: [DONE]\n\n".encode()
 
         async def fake_send(self_arg, req, **kwargs):
             resp = MagicMock()
@@ -535,7 +528,7 @@ class TestProxy:
         assert resp.status_code == 200
         lines = [line for line in resp.text.splitlines() if line.startswith("data: ")]
         data_line = next(l for l in lines if l != "data: [DONE]")
-        chunk = _json.loads(data_line[6:])
+        chunk = json.loads(data_line[6:])
         assert chunk["model"] == "caller-model"
 
 

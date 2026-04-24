@@ -888,7 +888,6 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(dt.datetime.now().timestamp()),
-        "model": requested_model,
         "choices": [
             {
                 "index": 0,
@@ -900,6 +899,8 @@ async def _handle_builtin_tool_chat(payload: dict[str, Any]) -> Response:
             }
         ],
     }
+    # Always overwrite the model field: when last_response came from
+    # llama-server it may carry a different (internal) model name.
     fallback["model"] = requested_model
     if total_usage:
         fallback["usage"] = total_usage
