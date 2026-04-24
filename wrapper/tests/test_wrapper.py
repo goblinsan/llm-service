@@ -17,6 +17,7 @@ import main as m
 
 ADMIN_HDR = {"Authorization": "Bearer test-admin-token"}
 BAD_HDR = {"Authorization": "Bearer wrong-token"}
+RETRY_AFTER = "5"
 
 
 # ---------------------------------------------------------------------------
@@ -1216,3 +1217,174 @@ class TestServingMetrics:
 
         assert resp.status_code == 200
         assert m._metrics["model_load_error_total"] == original + 1
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator compatibility — stable contracts for agent-service integration
+# (Issue #56: multi-model requests, health-state transitions, error behavior)
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorCompatibility:
+    """Validate the stable interface that agent-service (or any upstream
+    orchestrator) relies on when consuming llm-service as a raw inference node.
+
+    Covers:
+    * Health-state transitions — correct HTTP codes and headers for all four states
+    * GET /api/node always returns HTTP 200 regardless of health state
+    * Model name echoing for arbitrary caller-supplied identifiers
+    * 503 / 429 error semantics with correct Retry-After header behavior
+    """
+
+    # ------------------------------------------------------------------ #
+    # Health-state HTTP codes and headers                                  #
+    # ------------------------------------------------------------------ #
+
+    def test_health_all_states_return_expected_codes(self, client):
+        """All four health states must produce the documented HTTP codes."""
+        cases = [
+            ("ready",    200),
+            ("loading",  503),
+            ("no-model", 503),
+            ("error",    503),
+        ]
+        for status, expected_code in cases:
+            m._state["status"] = status
+            resp = client.get("/health")
+            assert resp.status_code == expected_code, (
+                f"GET /health: expected {expected_code} for status={status!r}, got {resp.status_code}"
+            )
+
+    def test_health_loading_includes_retry_after(self, client):
+        """Retry-After header must be present on /health when state is loading."""
+        m._state["status"] = "loading"
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == RETRY_AFTER
+
+    def test_health_no_model_omits_retry_after(self, client):
+        """No Retry-After on /health when state is no-model (operator must act)."""
+        m._state["status"] = "no-model"
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") is None
+
+    def test_health_error_body_contains_status_field(self, client):
+        m._state["status"] = "error"
+        m._state["error"] = "llama crash"
+        body = client.get("/health").json()
+        assert body["status"] == "error"
+
+    # ------------------------------------------------------------------ #
+    # GET /api/node — always HTTP 200 for orchestrators                   #
+    # ------------------------------------------------------------------ #
+
+    def test_node_returns_200_in_error_state(self, client):
+        """Orchestrators must be able to read capability metadata even after a crash."""
+        m._state["status"] = "error"
+        m._state["error"] = "llama startup failed"
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+
+    def test_node_returns_200_in_no_model_state(self, client):
+        """Orchestrators must be able to read metadata when no model is loaded."""
+        m._state["status"] = "no-model"
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "no-model"
+
+    def test_node_returns_200_in_loading_state(self, client):
+        """Orchestrators must be able to read metadata while model is loading."""
+        m._state["status"] = "loading"
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "loading"
+
+    def test_node_returns_200_in_ready_state(self, client):
+        m._state["status"] = "ready"
+        resp = client.get("/api/node")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    # ------------------------------------------------------------------ #
+    # Inference 503 semantics                                              #
+    # ------------------------------------------------------------------ #
+
+    def test_inference_returns_503_when_no_model(self, client):
+        """POST /v1/chat/completions must return 503 when no model is loaded."""
+        m._state["status"] = "no-model"
+        resp = client.post("/v1/chat/completions", json={"messages": []})
+        assert resp.status_code == 503
+
+    def test_inference_returns_503_without_retry_after_when_no_model(self, client):
+        """no-model 503 must not carry Retry-After — operator action required."""
+        m._state["status"] = "no-model"
+        resp = client.post("/v1/chat/completions", json={"messages": []})
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") is None
+
+    def test_inference_returns_503_with_retry_after_when_loading(self, client):
+        """POST /v1/chat/completions must return 503 + Retry-After when loading."""
+        m._state["status"] = "loading"
+        resp = client.post("/v1/chat/completions", json={"messages": []})
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == RETRY_AFTER
+
+    def test_inference_returns_503_with_retry_after_when_error(self, client):
+        """POST /v1/chat/completions must return 503 + Retry-After on error state."""
+        m._state["status"] = "error"
+        m._state["error"] = "backend crash"
+        resp = client.post("/v1/chat/completions", json={"messages": []})
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == RETRY_AFTER
+
+    # ------------------------------------------------------------------ #
+    # Model name echoing (multi-model / alias routing)                    #
+    # ------------------------------------------------------------------ #
+
+    def test_model_name_echoed_for_multiple_caller_aliases(self, reset_state):
+        """Model field must echo the caller's value for any identifier an
+        orchestrator sends — e.g. routing aliases, node labels, or 'local'."""
+
+        async def fake_send(self_arg, req, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {"content-type": "application/json"}
+            upstream_body = json.dumps({
+                "id": "chatcmpl-xyz",
+                "object": "chat.completion",
+                "model": "some-internal-llama-path.gguf",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }).encode()
+
+            async def aiter_raw():
+                yield upstream_body
+
+            async def aclose():
+                pass
+
+            resp.aiter_raw = aiter_raw
+            resp.aclose = aclose
+            return resp
+
+        aliases = ("local", "llm-node-0", "agent-service-model-v1", "mistral-7b")
+        with patch.object(m.httpx.AsyncClient, "send", new=fake_send):
+            with TestClient(m.app) as c:
+                for alias in aliases:
+                    resp = c.post(
+                        "/v1/chat/completions",
+                        json={"messages": [], "model": alias, "stream": False},
+                    )
+                    assert resp.status_code == 200, (
+                        f"alias={alias!r}: expected 200, got {resp.status_code}"
+                    )
+                    assert resp.json()["model"] == alias, (
+                        f"alias={alias!r}: expected model={alias!r}, got {resp.json()['model']!r}"
+                    )
