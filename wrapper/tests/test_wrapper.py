@@ -1136,7 +1136,7 @@ class TestServingMetrics:
 
     def test_uptime_seconds_is_non_negative(self, client):
         body = client.get("/api/metrics").json()
-        assert body["uptime_seconds"] > 0
+        assert body["uptime_seconds"] >= 0
 
     def test_active_requests_reflects_counter(self, client):
         original = m._active_inference
