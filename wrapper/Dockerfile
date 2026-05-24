@@ -1,9 +1,9 @@
-ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04
-ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:12.9.1-devel-ubuntu24.04
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.9.1-runtime-ubuntu24.04
 # Newer llama.cpp revisions add Gemma 4 support, but the floating prebuilt
 # CUDA images failed to initialize on the RTX 4060 node with driver 550 /
-# CUDA 12.4. Build llama.cpp from source against CUDA 12.4 instead so we keep
-# GPU compatibility and regain newer model-architecture support.
+# CUDA 12.4. Build llama.cpp from source, but keep the CUDA image version
+# current enough to compile for newer Blackwell cards such as the RTX 5060 Ti.
 ARG LLAMA_CPP_REF=master
 ARG LLAMA_CUDA_ARCHITECTURES=89
 

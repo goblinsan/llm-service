@@ -3,6 +3,8 @@ services:
     build:
       context: ./wrapper
       args:
+        CUDA_DEVEL_IMAGE: ${CUDA_DEVEL_IMAGE:-nvidia/cuda:12.9.1-devel-ubuntu24.04}
+        CUDA_RUNTIME_IMAGE: ${CUDA_RUNTIME_IMAGE:-nvidia/cuda:12.9.1-runtime-ubuntu24.04}
         LLAMA_CUDA_ARCHITECTURES: ${LLAMA_CUDA_ARCHITECTURES:-89}
     restart: unless-stopped
     ports:

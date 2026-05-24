@@ -32,6 +32,9 @@ All tunables live in `.env` (copy from `.env.example`):
 | `HOST_PORT` | `5301` | Host port mapped to the container's internal port 8080 |
 | `UI_PORT` | `5302` | Host port for the local operator UI (nginx container, port 80 internally). The UI proxies `/health`, `/api/*`, and `/v1/*` to the `llm-service` container. |
 | `ADMIN_TOKEN` | *(empty)* | Bearer token required for model management write endpoints. Leave empty to disable auth (dev only). |
+| `CUDA_DEVEL_IMAGE` | `nvidia/cuda:12.9.1-devel-ubuntu24.04` | Base image used to compile `llama.cpp`. Override only when pinning a different CUDA toolchain for a node class. |
+| `CUDA_RUNTIME_IMAGE` | `nvidia/cuda:12.9.1-runtime-ubuntu24.04` | Base image used to run the wrapper and `llama-server`. Keep aligned with `CUDA_DEVEL_IMAGE` unless you have a deliberate split. |
+| `LLAMA_CUDA_ARCHITECTURES` | `89` | CUDA compute capability passed to the `llama.cpp` build. Set per node class, e.g. `89` for Ada or `120` for Blackwell. |
 | `LLAMA_BIN` | *(auto-detect)* | Optional absolute path to `llama-server` inside the container. Only set this if the base image places the binary somewhere unusual. |
 | `MAX_TOKENS` | `2048` | Hard cap on `max_tokens` per inference request. Requests that exceed this value (or omit it) are silently clamped. Lower values reduce peak KV-cache VRAM pressure. |
 | `REQUEST_TIMEOUT` | `120` | Seconds before an in-flight inference request is abandoned and a `504` is returned to the caller. |
@@ -72,6 +75,20 @@ huggingface-cli download \
 # Then set in .env:
 MODEL_PATH=/data/models/llm/mistral-7b-v0.3.Q4_K_M.gguf
 ```
+
+### GPU build compatibility
+
+The compose build supports mixed GPU fleets by separating the node-specific CUDA knobs from the runtime behavior:
+
+- `CUDA_DEVEL_IMAGE` and `CUDA_RUNTIME_IMAGE` select the CUDA toolchain/runtime images used for the build.
+- `LLAMA_CUDA_ARCHITECTURES` selects the compute capability compiled into `llama.cpp`.
+
+Typical values:
+
+- Ada / RTX 40-series nodes: `LLAMA_CUDA_ARCHITECTURES=89`
+- Blackwell / RTX 50-series nodes: `LLAMA_CUDA_ARCHITECTURES=120`
+
+The defaults now target a CUDA `12.9` image line so newer Blackwell cards can build successfully, while older nodes can keep using their own architecture override without changing application code.
 
 ---
 
