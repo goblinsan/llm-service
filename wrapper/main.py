@@ -100,6 +100,67 @@ REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "1"))
 _SKIP_LLAMA_STARTUP: bool = os.getenv("SKIP_LLAMA_STARTUP", "0") == "1"
 
+# Directory used to persist small bits of runtime state across restarts.
+# A successful POST /api/models/load writes {filename, ctx_size, n_gpu_layers}
+# here; _on_startup() reads it back so the most-recently-loaded model is
+# restored automatically after a container recreate. Defaults to the
+# /data/llm volume already mounted by docker-compose.yml.
+LLM_STATE_DIR: Path = Path(os.getenv("LLM_STATE_DIR", "/data/llm"))
+_ACTIVE_MODEL_FILE: Path = LLM_STATE_DIR / "active_model.json"
+
+
+def _persist_active_model(filename: str, ctx_size: int, n_gpu_layers: int) -> None:
+    """Record the active model so it can be auto-loaded on next startup.
+
+    Failures are logged at warning and swallowed: persistence is best-effort
+    and must never break the live request path.
+    """
+    try:
+        LLM_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "filename": os.path.basename(filename),
+            "ctx_size": int(ctx_size),
+            "n_gpu_layers": int(n_gpu_layers),
+        }
+        tmp = _ACTIVE_MODEL_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(_ACTIVE_MODEL_FILE)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Failed to persist active model state: %s", exc)
+
+
+def _clear_persisted_active_model() -> None:
+    """Remove the persisted active-model marker (called on explicit unload)."""
+    try:
+        _ACTIVE_MODEL_FILE.unlink(missing_ok=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Failed to clear persisted active model state: %s", exc)
+
+
+def _load_persisted_active_model() -> Optional[dict]:
+    """Return the persisted active-model payload, or None if absent/invalid."""
+    try:
+        if not _ACTIVE_MODEL_FILE.is_file():
+            return None
+        data = json.loads(_ACTIVE_MODEL_FILE.read_text())
+        if not isinstance(data, dict):
+            return None
+        filename = data.get("filename")
+        if not isinstance(filename, str) or not filename.endswith(".gguf"):
+            return None
+        return {
+            "filename": os.path.basename(filename),
+            "ctx_size": int(data.get("ctx_size") or INITIAL_CTX_SIZE),
+            "n_gpu_layers": int(
+                data.get("n_gpu_layers")
+                if data.get("n_gpu_layers") is not None
+                else INITIAL_N_GPU_LAYERS
+            ),
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Failed to read persisted active model state: %s", exc)
+        return None
+
 
 def _find_llama_bin() -> Optional[str]:
     """Locate the llama-server binary (path varies by image version)."""
@@ -1029,6 +1090,32 @@ async def _on_startup() -> None:
         log.info("SKIP_LLAMA_STARTUP=1 — skipping llama-server launch (test/dev mode)")
         return
 
+    # If the configured INITIAL_MODEL is missing, try to recover the most
+    # recently loaded model from the persisted state file. This lets a
+    # container recreate (e.g. after a deploy or host reboot) come back up
+    # serving the same GGUF the operator chose via POST /api/models/load,
+    # instead of landing in status:"no-model".
+    if not os.path.isfile(_state["model"]):
+        persisted = _load_persisted_active_model()
+        if persisted is not None:
+            candidate = MODELS_DIR / persisted["filename"]
+            if candidate.is_file():
+                log.info(
+                    "Restoring persisted active model: %s (ctx=%d, n_gpu_layers=%d)",
+                    persisted["filename"],
+                    persisted["ctx_size"],
+                    persisted["n_gpu_layers"],
+                )
+                _state["model"] = str(candidate)
+                _state["ctx_size"] = persisted["ctx_size"]
+                _state["n_gpu_layers"] = persisted["n_gpu_layers"]
+            else:
+                log.warning(
+                    "Persisted active model %s not found in %s — ignoring",
+                    persisted["filename"],
+                    MODELS_DIR,
+                )
+
     if not os.path.isfile(_state["model"]):
         _state["process"] = None
         _state["status"] = "no-model"
@@ -1401,6 +1488,11 @@ async def load_model(
         _metrics["model_load_error_total"] += 1
     else:
         _metrics["model_load_total"] += 1
+        _persist_active_model(
+            safe_filename,
+            int(_state["ctx_size"]),
+            int(_state["n_gpu_layers"]),
+        )
 
     return {
         "loaded_model": _state["model"],
@@ -1425,6 +1517,11 @@ async def unload_model(
     _state["model"] = ""
     _state["status"] = "no-model"
     _state["error"] = "Model unloaded by operator" if had_model else "No model loaded"
+
+    # An explicit unload is operator intent — drop the persisted marker so
+    # the next restart does not silently re-load the model the operator
+    # just told us to release.
+    _clear_persisted_active_model()
 
     log.info(
         "Model unloaded%s",
