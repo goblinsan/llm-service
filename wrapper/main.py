@@ -156,6 +156,23 @@ _llama_log_tail: deque[str] = deque(maxlen=200)
 # await between the check and the increment below).
 _active_inference: int = 0
 
+
+def _release_inference_slot(released: list[bool]) -> None:
+    """Idempotently release one inference slot.
+
+    ``released`` is a single-element mutable flag scoped to one request, so a
+    second call (e.g. from both an exception handler and a generator finally)
+    is a no-op.  This makes slot accounting robust to cleanup paths that may
+    themselves raise (httpx ``aclose`` after a torn-down connection, ASGI
+    ``send`` raising mid-stream, etc.).
+    """
+    if released[0]:
+        return
+    released[0] = True
+    global _active_inference
+    if _active_inference > 0:
+        _active_inference -= 1
+
 # Monotonic timestamp recorded when the module is first loaded.
 _start_time: float = time.monotonic()
 
@@ -1522,6 +1539,10 @@ async def proxy(request: Request, path: str) -> Response:
     # Concurrency guard — serialise inference requests (one slot by        #
     # default) so that a long generation cannot starve other GPU work.     #
     # ------------------------------------------------------------------ #
+    # Per-request flag for idempotent slot release; see
+    # ``_release_inference_slot``.  Initialised to ``[True]`` for non-inference
+    # requests so any accidental release call is a no-op.
+    slot_released: list[bool] = [not is_inference]
     if is_inference:
         global _active_inference
         # asyncio is single-threaded: the check and increment below are
@@ -1585,8 +1606,7 @@ async def proxy(request: Request, path: str) -> Response:
                 status_code=500,
             )
         finally:
-            if is_inference:
-                _active_inference -= 1
+            _release_inference_slot(slot_released)
 
     # Use a finite read timeout only for GPU-bound inference requests.
     timeout = (
@@ -1605,24 +1625,30 @@ async def proxy(request: Request, path: str) -> Response:
         )
         upstream_resp = await client.send(upstream_req, stream=True)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        await client.aclose()
-        if is_inference:
-            _active_inference -= 1
-            _metrics["requests_error_total"] += 1
+        try:
+            await client.aclose()
+        finally:
+            if is_inference:
+                _metrics["requests_error_total"] += 1
+            _release_inference_slot(slot_released)
         log.warning("Proxy connect error: %s", exc)
         return JSONResponse({"error": "backend unavailable"}, status_code=503)
     except httpx.ReadTimeout:
-        await client.aclose()
-        if is_inference:
-            _active_inference -= 1
-            _metrics["requests_timeout_total"] += 1
+        try:
+            await client.aclose()
+        finally:
+            if is_inference:
+                _metrics["requests_timeout_total"] += 1
+            _release_inference_slot(slot_released)
         log.warning("Inference request timed out after %.0fs", REQUEST_TIMEOUT)
         return JSONResponse({"error": "inference timeout"}, status_code=504)
     except Exception:
-        await client.aclose()
-        if is_inference:
-            _active_inference -= 1
-            _metrics["requests_error_total"] += 1
+        try:
+            await client.aclose()
+        finally:
+            if is_inference:
+                _metrics["requests_error_total"] += 1
+            _release_inference_slot(slot_released)
         raise
 
     resp_headers = {
@@ -1642,6 +1668,15 @@ async def proxy(request: Request, path: str) -> Response:
         and bool(payload.get("stream"))
     )
     rewrite_model = bool(requested_model and path == "v1/chat/completions")
+
+    # When we rewrite the response body the byte length will change, so the
+    # upstream's ``content-length`` is no longer valid.  Drop it and let the
+    # ASGI server compute the correct length (or fall back to chunked
+    # transfer-encoding).  Forwarding the stale value caused
+    # ``RuntimeError: Response content longer than Content-Length`` mid-stream
+    # which silently leaked the inference slot.
+    if rewrite_model:
+        resp_headers.pop("content-length", None)
 
     async def body_gen():
         try:
@@ -1680,11 +1715,17 @@ async def proxy(request: Request, path: str) -> Response:
                 # waiting for more data (issue #43).
                 yield b"data: [DONE]\n\n"
         finally:
-            await upstream_resp.aclose()
-            await client.aclose()
-            if is_inference:
-                global _active_inference
-                _active_inference -= 1
+            # Release the slot FIRST so a failing aclose() (common when the
+            # client tore down mid-stream) cannot block reuse.
+            _release_inference_slot(slot_released)
+            try:
+                await upstream_resp.aclose()
+            except Exception:
+                log.debug("upstream_resp.aclose() failed", exc_info=True)
+            try:
+                await client.aclose()
+            except Exception:
+                log.debug("client.aclose() failed", exc_info=True)
 
     return StreamingResponse(
         body_gen(),
