@@ -33,9 +33,14 @@ LLAMA_STARTUP_TIMEOUT Seconds to wait for llama-server /health after launch.
                     Default: 120
 DOWNLOAD_READ_TIMEOUT Read timeout in seconds for model downloads.
                     Default: 300
-MAX_TOKENS          Hard cap on max_tokens for each inference request.
-                    Requests that omit max_tokens or exceed this cap are
-                    silently clamped to this value.  Default: 2048
+MAX_TOKENS          Hard cap on explicit max_tokens for each inference
+                    request. Requests exceeding it are clamped. Set to 0 to
+                    disable the cap (allow up to the context window). Default:
+                    2048
+DEFAULT_MAX_TOKENS  Value applied when a request omits max_tokens. Falls back
+                    to MAX_TOKENS. Set to 0 to leave such requests uncapped so
+                    they can generate to the context window (needed by
+                    whole-file code generation callers). Default: MAX_TOKENS
 REQUEST_TIMEOUT     Seconds before an in-flight inference request is
                     abandoned and a 504 is returned to the caller.
                     Default: 120
@@ -96,6 +101,11 @@ INITIAL_MODEL: str = os.getenv("MODEL_PATH", str(MODELS_DIR / "model.gguf"))
 LLAMA_STARTUP_TIMEOUT: int = int(os.getenv("LLAMA_STARTUP_TIMEOUT", "300"))
 DOWNLOAD_READ_TIMEOUT: float = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "300"))
 MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "2048"))
+# Value applied when a request omits max_tokens entirely. Falls back to
+# MAX_TOKENS for backward compatibility. Set to 0 (with MAX_TOKENS<=0) to let
+# such requests generate freely up to the context window (llama-server n-predict
+# -1), which is what whole-file code generation callers need.
+DEFAULT_MAX_TOKENS: int = int(os.getenv("DEFAULT_MAX_TOKENS", str(MAX_TOKENS)))
 REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "120"))
 MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "1"))
 _SKIP_LLAMA_STARTUP: bool = os.getenv("SKIP_LLAMA_STARTUP", "0") == "1"
@@ -1213,6 +1223,7 @@ def node_capabilities() -> dict:
         "loaded_model": Path(active_model_path).name if active_model_path else "",
         "ctx_size": _state["ctx_size"],
         "max_tokens": MAX_TOKENS,
+        "default_max_tokens": DEFAULT_MAX_TOKENS,
         "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
         "n_gpu_layers": _state["n_gpu_layers"],
         "llama": _get_llama_diagnostics(),
@@ -1675,13 +1686,28 @@ async def proxy(request: Request, path: str) -> Response:
             pass  # malformed body — let llama-server handle it
 
     # ------------------------------------------------------------------ #
-    # Token-budget enforcement — silently clamp max_tokens to MAX_TOKENS  #
-    # so a single request cannot monopolise VRAM via a huge KV cache.     #
+    # Token-budget enforcement.                                          #
+    #   * MAX_TOKENS is a hard cap on explicit requests (<=0 disables it, #
+    #     letting callers request up to the context window).             #
+    #   * When a request omits max_tokens, DEFAULT_MAX_TOKENS is applied  #
+    #     (bounded by the hard cap); DEFAULT_MAX_TOKENS<=0 leaves the      #
+    #     request uncapped so it can generate to the context window.      #
     # ------------------------------------------------------------------ #
     if isinstance(payload, dict) and path in _TOKEN_BUDGET_PATHS:
-        effective_max = payload.get("max_tokens")
-        if effective_max is None or effective_max > MAX_TOKENS:
-            payload["max_tokens"] = MAX_TOKENS
+        requested = payload.get("max_tokens")
+        hard_cap = MAX_TOKENS if MAX_TOKENS > 0 else None
+        new_value = None
+        if requested is None:
+            if DEFAULT_MAX_TOKENS > 0:
+                new_value = (
+                    min(DEFAULT_MAX_TOKENS, hard_cap)
+                    if hard_cap is not None
+                    else DEFAULT_MAX_TOKENS
+                )
+        elif hard_cap is not None and requested > hard_cap:
+            new_value = hard_cap
+        if new_value is not None and new_value != requested:
+            payload["max_tokens"] = new_value
             body = json.dumps(payload).encode()
             fwd_headers["content-length"] = str(len(body))
             fwd_headers.setdefault("content-type", "application/json")

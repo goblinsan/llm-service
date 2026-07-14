@@ -1007,7 +1007,7 @@ class TestInferenceConcurrency:
 
 
 class TestMaxTokensCapping:
-    def _post_chat(self, payload: dict, max_tokens_cap: int = 512):
+    def _post_chat(self, payload: dict, max_tokens_cap: int = 512, default_cap=None):
         """POST /v1/chat/completions and return the body forwarded to llama-server."""
         import json as _json
         from unittest.mock import MagicMock, patch
@@ -1031,7 +1031,9 @@ class TestMaxTokensCapping:
             return resp
 
         original_max = m.MAX_TOKENS
+        original_default = m.DEFAULT_MAX_TOKENS
         m.MAX_TOKENS = max_tokens_cap
+        m.DEFAULT_MAX_TOKENS = default_cap if default_cap is not None else max_tokens_cap
         try:
             with patch.object(m.httpx.AsyncClient, "send", new=fake_send):
                 from fastapi.testclient import TestClient
@@ -1040,6 +1042,7 @@ class TestMaxTokensCapping:
                     c.post("/v1/chat/completions", json=payload)
         finally:
             m.MAX_TOKENS = original_max
+            m.DEFAULT_MAX_TOKENS = original_default
 
         return captured.get("body", {})
 
@@ -1055,6 +1058,29 @@ class TestMaxTokensCapping:
         """If the caller requests fewer tokens than the cap, preserve their value."""
         body = self._post_chat({"messages": [], "max_tokens": 100}, max_tokens_cap=2048)
         assert body.get("max_tokens") == 100
+
+    def test_absent_uses_default_separate_from_hard_cap(self, reset_state):
+        """Omitted max_tokens uses DEFAULT_MAX_TOKENS, not the higher hard cap."""
+        body = self._post_chat({"messages": []}, max_tokens_cap=8192, default_cap=2048)
+        assert body.get("max_tokens") == 2048
+
+    def test_explicit_over_hard_cap_still_clamped(self, reset_state):
+        body = self._post_chat(
+            {"messages": [], "max_tokens": 99999}, max_tokens_cap=8192, default_cap=2048
+        )
+        assert body.get("max_tokens") == 8192
+
+    def test_absent_left_uncapped_when_cap_and_default_disabled(self, reset_state):
+        """With MAX_TOKENS=0 and DEFAULT_MAX_TOKENS=0, an omitted budget stays unset."""
+        body = self._post_chat({"messages": []}, max_tokens_cap=0, default_cap=0)
+        assert "max_tokens" not in body
+
+    def test_no_hard_cap_respects_large_explicit(self, reset_state):
+        """With the cap disabled, a large explicit request is honored (up to context)."""
+        body = self._post_chat(
+            {"messages": [], "max_tokens": 50000}, max_tokens_cap=0, default_cap=0
+        )
+        assert body.get("max_tokens") == 50000
 
 
 
